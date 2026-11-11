@@ -1,0 +1,9 @@
+# ESPKB (ESP32-S3 WiFi keyboard/mouse) -- test isolation for THIS development host.
+# During development the device's HID port is plugged into this machine. These rules keep its
+# keystrokes/mouse events out of the local desktop: usbhid is unbound right after it binds, and
+# the raw USB node is opened up so the test harness (libusb) can act as the USB host instead.
+# To let the device work as a real keyboard/mouse on this machine, delete this file and run:
+#   sudo udevadm control --reload-rules
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="303a", ATTR{idProduct}=="4004", MODE="0666"
+ACTION=="bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", DRIVER=="usbhid", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4004", RUN+="/bin/sh -c 'echo %k > /sys/bus/usb/drivers/usbhid/unbind'"
+SUBSYSTEM=="input", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4004", ENV{LIBINPUT_IGNORE_DEVICE}="1", TAG-="power-switch"

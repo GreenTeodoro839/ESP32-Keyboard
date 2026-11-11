@@ -1,0 +1,7 @@
+# tools/espkb.py uses only the Python standard library (3.8+): no requirements.
+# tools/hidhost.py, tools/serialcon.py and the pytest suite in tests/ need:
+pyusb>=1.2          # also needs the system library libusb-1.0
+pyserial>=3.5
+websocket-client>=1.6
+requests>=2.28
+pytest>=7.0

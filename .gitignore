@@ -1,0 +1,19 @@
+# build output and fetched dependencies
+.pio/
+managed_components/
+sdkconfig.*
+!sdkconfig.defaults
+# generated on every build by scripts/embed_web.py
+src/web_page_gen.c
+# per-machine settings
+platformio_local.ini
+tests/testbed.env
+tests/device.env
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# web dev artefacts
+web/dev/shots/
+web/dev/*.log

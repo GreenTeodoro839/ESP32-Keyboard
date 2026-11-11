@@ -1,0 +1,1178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>ESPKB</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#f2f3f5;--card:#fff;--fg:#17191c;--mut:#5f6874;--line:#d6dae0;--key:#eceef2;--keyh:#e0e4e9;--acc:#1f6feb;--acc2:rgba(31,111,235,.10);--accfg:#fff;--ok:#1a7f37;--warn:#9a6700;--warnbg:#fff6d6;--bad:#cf222e;--badbg:#ffebe9;--infobg:#e8f0fe;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b20;--fg:#e4e7eb;--mut:#959ca6;--line:#2c3139;--key:#242931;--keyh:#2e343d;--acc:#4c8dff;--acc2:rgba(76,141,255,.16);--accfg:#0b1220;--ok:#3fb950;--warn:#d6a32a;--warnbg:#33290c;--bad:#f85149;--badbg:#3b1517;--infobg:#16233d;color-scheme:dark}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;padding-bottom:env(safe-area-inset-bottom)}
+button,input,textarea{font:inherit;color:inherit}
+h2{font-size:15px;margin:0 0 8px;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+h3{font-size:13px;margin:12px 0 6px;color:var(--mut);font-weight:600}
+small,.hint{color:var(--mut);font-size:12px;font-weight:400}
+.hint{margin:8px 0 0}
+kbd{font:12px ui-monospace,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;background:var(--key)}
+code{font:12px ui-monospace,Menlo,Consolas,monospace;background:var(--key);border-radius:3px;padding:0 3px}
+.btn{border:1px solid var(--line);background:var(--card);border-radius:6px;padding:5px 12px;cursor:pointer;white-space:nowrap;touch-action:manipulation}
+.btn:hover{background:var(--key)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:var(--accfg);font-weight:600}
+.btn.danger{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:600}
+.btn.sm{padding:2px 8px;font-size:12px}
+input[type=text],input[type=password],input[type=number],input:not([type]),textarea{border:1px solid var(--line);background:var(--bg);border-radius:6px;padding:6px 8px;min-width:0}
+input:focus,textarea:focus,.btn:focus-visible,.k:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sp{flex:1}
+/* header */
+header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:6px 12px;padding-top:max(6px,env(safe-area-inset-top))}
+.hr{display:flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:1280px;margin:0 auto}
+.hr+.hr{margin-top:4px}
+.brand{font-weight:700;letter-spacing:.5px;margin-right:4px}
+.pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:12px;white-space:nowrap;color:var(--mut)}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:var(--mut)}
+.pill.ok{color:var(--ok)}.pill.ok .dot{background:var(--ok)}
+.pill.warn{color:var(--warn)}.pill.warn .dot{background:var(--warn)}
+.pill.bad{color:var(--bad)}.pill.bad .dot{background:var(--bad)}
+#pConn{cursor:default}
+#pConn.click{cursor:pointer;text-decoration:underline dotted}
+.leds{display:inline-flex;gap:3px}
+.leds i{font-style:normal;font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 5px;color:var(--mut)}
+.leds i.on{background:var(--ok);border-color:var(--ok);color:#fff}
+.bars{display:inline-flex;align-items:flex-end;gap:1px;height:11px}
+.bars b{width:3px;background:var(--line);border-radius:1px}
+.bars b:nth-child(1){height:3px}.bars b:nth-child(2){height:6px}.bars b:nth-child(3){height:9px}.bars b:nth-child(4){height:11px}
+.bars b.on{background:currentColor}
+#pHeld.on{color:var(--warn);border-color:var(--warn)}
+/* banners */
+#banners{max-width:1280px;margin:8px auto 0;padding:0 12px;display:flex;flex-direction:column;gap:6px}
+#banners:empty{display:none}
+.banner{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px}
+.banner.warn{background:var(--warnbg);border-color:var(--warn)}
+.banner.bad{background:var(--badbg);border-color:var(--bad)}
+.banner.info{background:var(--infobg);border-color:var(--acc)}
+.banner span{flex:1;min-width:12em}
+/* layout */
+main{max-width:1280px;margin:0 auto;padding:10px 12px 16px;display:flex;flex-direction:column;gap:10px}
+.col{display:contents}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:0}
+.c-ctl{order:1}.c-text{order:2}.c-keys{order:3}.c-log{order:4}
+@media (min-width:900px){main{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);align-items:start}.col{display:flex;flex-direction:column;gap:10px;min-width:0}}
+/* tabs */
+.tabs{display:flex;gap:4px;margin-bottom:8px;border-bottom:1px solid var(--line)}
+.tabs button{border:0;background:none;padding:6px 12px;cursor:pointer;color:var(--mut);border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs button[aria-selected=true]{color:var(--fg);border-bottom-color:var(--acc);font-weight:600}
+/* capture */
+#cap{height:230px;border:2px dashed var(--line);border-radius:10px;display:flex;align-items:center;justify-content:center;text-align:center;cursor:pointer;user-select:none;-webkit-user-select:none;outline:none;padding:12px;background:var(--bg)}
+#cap b{display:block;font-size:17px;margin-bottom:4px}
+#cap span{color:var(--mut);font-size:13px}
+#cap .usbw{display:block;color:var(--bad);margin-top:6px}
+#cap.kbd{border:2px solid var(--acc);background:var(--acc2);cursor:cell}
+#cap.kbd b{color:var(--acc)}
+#cap.lock{border:3px solid var(--acc);background:var(--acc2);cursor:none}
+#cap.lock b{color:var(--acc)}
+.tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}
+.rng{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--mut)}
+.rng input{width:120px}
+.rng output{min-width:3.2em;color:var(--fg);font-variant-numeric:tabular-nums}
+.mine{margin-top:8px;font-size:12px;color:var(--mut)}
+.mine.on{color:var(--warn);font-weight:600}
+/* touchpad */
+#pad{height:min(46vh,360px);min-height:200px;border:1px solid var(--line);border-radius:10px;background:var(--key);touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;display:flex;align-items:flex-end;justify-content:center;padding:10px;color:var(--mut);font-size:12px;text-align:center}
+#pad.drag{border:2px solid var(--warn)}
+#pad.drag #padT{color:var(--warn);font-weight:600}
+.mbtns{display:grid;grid-template-columns:1fr .7fr 1fr 1fr;gap:6px;margin-top:6px;touch-action:none}
+.mbtns button{height:48px;border:1px solid var(--line);border-radius:8px;background:var(--key);cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.mbtns button.on,#bDrag.on{background:var(--acc);border-color:var(--acc);color:var(--accfg)}
+#bDrag.on{background:var(--warn);border-color:var(--warn);color:#fff;font-weight:600}
+/* keys */
+.kg{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:6px}
+.kg.f{grid-template-columns:repeat(auto-fill,minmax(44px,1fr))}
+.k{height:38px;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;background:var(--key);cursor:pointer;padding:0 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;touch-action:manipulation;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.k:hover{background:var(--keyh)}
+.k.on{background:var(--acc);border-color:var(--acc);color:var(--accfg)}
+.k.lat{position:relative}
+.k.lat.on{background:var(--warn);border-color:var(--warn);color:#fff;font-weight:700}
+.navrow{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.navrow .kg{flex:1;min-width:220px}
+.arrows{display:grid;grid-template-columns:repeat(3,44px);gap:6px}
+.arrows .k:nth-child(1){grid-area:1/2}.arrows .k:nth-child(2){grid-area:2/1}.arrows .k:nth-child(3){grid-area:2/2}.arrows .k:nth-child(4){grid-area:2/3}
+.combos{display:flex;flex-wrap:wrap;gap:6px}
+.combo{display:inline-flex;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;background:var(--key);overflow:hidden}
+.combo button{border:0;background:none;padding:6px 10px;cursor:pointer;touch-action:manipulation;white-space:nowrap}
+.combo button:hover{background:var(--keyh)}
+.combo .x{padding:6px 8px;color:var(--mut);border-left:1px solid var(--line)}
+#fCombo{margin-top:8px}
+#fCombo input{flex:1;min-width:10em}
+.err{color:var(--bad);font-size:12px;margin-top:4px}
+.err:empty{display:none}
+/* text */
+#txt{width:100%;min-height:96px;resize:vertical;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;margin-bottom:6px}
+.num{width:72px}
+.prog{height:6px;border-radius:3px;background:var(--key);overflow:hidden;margin-top:8px}
+.prog i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
+.msg{font-size:13px;margin-top:6px}
+.msg:empty{display:none}
+.msg.ok{color:var(--ok)}.msg.err{color:var(--bad)}.msg.warn{color:var(--warn)}
+.msg .row{margin-top:6px}
+/* log */
+.c-log summary{cursor:pointer;font-weight:600}
+#log{list-style:none;margin:8px 0 0;padding:0;max-height:220px;overflow:auto;font-size:12px}
+#log li{padding:3px 0;border-top:1px solid var(--line);display:flex;gap:8px}
+#log time{color:var(--mut);font-variant-numeric:tabular-nums;flex:none}
+#log .error{color:var(--bad)}#log .warn{color:var(--warn)}#log .ok{color:var(--ok)}
+/* toasts */
+#toasts{position:fixed;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));z-index:20;display:flex;flex-direction:column;gap:6px;max-width:min(380px,calc(100vw - 24px));pointer-events:none}
+.toast{pointer-events:auto;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:8px;padding:8px 10px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.15);cursor:pointer}
+.toast.error{border-left-color:var(--bad)}.toast.warn{border-left-color:var(--warn)}.toast.ok{border-left-color:var(--ok)}
+.toast .n{color:var(--mut);margin-left:6px}
+/* overlays */
+.ov{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;padding:24px 12px;overflow:auto}
+.sheet{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;width:100%;max-width:620px}
+.sheet.sm{max-width:400px;margin-top:10vh}
+.sh{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.sh h2{margin:0;flex:1;font-size:17px}
+fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 12px;padding:10px 12px 12px}
+fieldset.hl{border:2px solid var(--acc)}
+legend{font-weight:600;padding:0 4px}
+.fl{display:grid;grid-template-columns:7em minmax(0,1fr);gap:8px 10px;align-items:center}
+.fl>label{color:var(--mut);font-size:13px}
+.fl input:not([type=checkbox]){width:100%}
+.fl .ck{grid-column:2;color:var(--fg)}
+.fl .row input{flex:1}
+.full{grid-column:1/-1}
+.scan{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:6px;max-height:200px;overflow:auto}
+.scan li{display:flex;gap:8px;align-items:center;padding:6px 8px;cursor:pointer;border-top:1px solid var(--line)}
+.scan li:first-child{border-top:0}
+.scan li:hover{background:var(--key)}
+.scan li span:first-child{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scan:empty{display:none}
+dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:0;font-size:13px}
+dt{color:var(--mut)}dd{margin:0;overflow-wrap:anywhere}
+@media (max-width:600px){
+ body{font-size:15px}
+ input[type=text],input[type=password],input[type=number],input:not([type]),textarea{font-size:16px}
+ #txt{font-size:16px}
+ .fl{grid-template-columns:1fr}
+ .fl>label{margin-bottom:-4px}
+ .fl .ck{grid-column:1;margin:0}
+ .ov{padding:0}
+ .sheet{border-radius:0;min-height:100%;border:0}
+ .sheet.sm{margin-top:0}
+ .k{height:42px;font-size:13px}
+ .kg{grid-template-columns:repeat(4,minmax(0,1fr))}
+ .kg.f{grid-template-columns:repeat(6,minmax(0,1fr))}
+ .navrow .kg{min-width:100%}
+ #cap{height:160px}
+}
+</style>
+</head>
+<body>
+<header>
+ <div class="hr">
+  <span class="brand">ESPKB</span>
+  <span id="pConn" class="pill" title="与设备的连接"><i class="dot"></i><span id="connTxt">连接中…</span></span>
+  <span class="sp"></span>
+  <button id="bSet" class="btn">设置</button>
+  <button id="bStop" class="btn danger" title="中止设备上所有任务（包括其它客户端的）并松开所有按键">急停</button>
+ </div>
+ <div class="hr">
+  <span id="pUsb" class="pill" title="USB 状态"><i class="dot"></i><span>USB —</span></span>
+  <button id="bWake" class="btn sm" hidden>唤醒</button>
+  <span class="leds" title="目标电脑的键盘指示灯"><i id="lNum">Num</i><i id="lCaps">Caps</i><i id="lScr">Scroll</i></span>
+  <span id="pWifi" class="pill" title="设备 WiFi 信号">WiFi —</span>
+  <span id="pHeld" class="pill" title="设备当前报告按住的键（来自所有客户端）">设备按住：—</span>
+ </div>
+</header>
+<div id="banners"></div>
+<main>
+ <div class="col">
+  <section class="card c-ctl">
+   <div class="tabs" role="tablist">
+    <button id="tCap" role="tab">键鼠捕获</button>
+    <button id="tPad" role="tab">触控板</button>
+   </div>
+   <div id="vCap">
+    <div id="cap" tabindex="0" role="application" aria-label="键鼠捕获区"><div><b id="capT">点击这里开始控制</b><span id="capS"></span><span id="capU" class="usbw" hidden>USB 未连接：按键不会到达目标电脑</span></div></div>
+    <div class="tools">
+     <button id="bKbOnly" class="btn sm">仅捕获键盘</button>
+     <label class="rng">鼠标灵敏度 <input id="sMouse" type="range" min="0.2" max="4" step="0.1"><output id="oMouse"></output></label>
+    </div>
+    <p class="hint">点击区域后，键盘和鼠标都发送到目标电脑。鼠标锁定时按 <kbd>Esc</kbd> 只会释放鼠标（浏览器强制），此时键盘仍在捕获，再按 <kbd>Esc</kbd> 才会发给目标电脑；也可用“仅捕获键盘”或下方 Esc 键。点击区域外停止捕获。Ctrl+W、Alt+Tab、Win 等系统/浏览器快捷键网页无法截获，请用下方按键或组合键。</p>
+   </div>
+   <div id="vPad" hidden>
+    <div id="pad"><span id="padT">单指拖动：移动 · 轻点：左键 · 双指轻点：右键 · 双指拖动：滚动</span></div>
+    <div class="mbtns">
+     <button data-b="left">左键</button><button data-b="middle">中键</button><button data-b="right">右键</button><button id="bDrag" aria-pressed="false">拖动锁定</button>
+    </div>
+    <div class="tools">
+     <label class="rng">灵敏度 <input id="sPad" type="range" min="0.3" max="5" step="0.1"><output id="oPad"></output></label>
+    </div>
+   </div>
+   <div id="mine" class="mine">本页按住：无</div>
+  </section>
+  <section class="card c-keys">
+   <h2>按键 <small>修饰键点击锁定：保持按住，直到再次点击或发送下一个普通键</small></h2>
+   <div class="kg" id="kMods"></div>
+   <h3>功能键</h3>
+   <div class="navrow"><div class="kg" id="kMain"></div><div class="arrows" id="kArr"></div></div>
+   <div class="kg f" id="kF" style="margin-top:6px"></div>
+   <h3>组合键 <small>（单击发送）</small></h3>
+   <div class="combos" id="combos"></div>
+   <form id="fCombo" class="row"><input id="iCombo" placeholder="添加组合键，如 ctrl+alt+f2" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><button class="btn">添加</button></form>
+   <div id="comboErr" class="err"></div>
+  </section>
+ </div>
+ <div class="col">
+  <section class="card c-text">
+   <h2>发送文本</h2>
+   <textarea id="txt" rows="5" placeholder="输入或粘贴要在目标电脑上敲出的文字（Ctrl+Enter 发送）" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+   <div class="row">
+    <label><input type="checkbox" id="cEnter"> 末尾回车</label>
+    <label><input type="checkbox" id="cClear" checked> 发送后清空</label>
+    <label>每键间隔 <input id="iDelay" class="num" type="number" min="0" max="1000" inputmode="numeric" placeholder="默认"> ms</label>
+    <span class="sp"></span>
+    <button id="bAbort" class="btn" hidden>中止</button>
+    <button id="bSend" class="btn pri">发送</button>
+   </div>
+   <div id="txtLatch" class="msg warn" hidden></div>
+   <div id="prog" class="prog" hidden><i></i></div>
+   <div id="txtMsg" class="msg"></div>
+   <p class="hint">只能输入美式键盘可直接打出的 ASCII 字符（含换行、Tab）。目标电脑需使用美式键盘布局，并处于英文输入状态（关闭中文输入法）。</p>
+  </section>
+  <section class="card c-log"><details id="logD"><summary>日志 <small id="logN"></small></summary><ol id="log"></ol></details></section>
+ </div>
+</main>
+<div id="toasts" aria-live="polite"></div>
+
+<div id="ovSet" class="ov" hidden><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="setH">
+ <div class="sh"><h2 id="setH">设置</h2><button class="btn" data-close>关闭</button></div>
+ <div id="setSetup" class="banner info" hidden style="margin-bottom:12px"><span>设备尚未连接 WiFi 路由器（当前通过配网热点访问）。请选择要连接的网络并保存，然后重启设备。</span></div>
+ <form id="fCfg" autocomplete="off" novalidate>
+  <fieldset id="fsWifi"><legend>WiFi（连接路由器）</legend>
+   <div class="fl">
+    <label for="cSsid">网络名称</label>
+    <div class="row"><input id="cSsid" type="text" placeholder="SSID，留空 = 不连接路由器" autocapitalize="off" autocorrect="off" spellcheck="false"><button type="button" id="bScan" class="btn">扫描</button></div>
+    <ul id="scanList" class="scan full"></ul>
+    <label for="cWpw">密码</label>
+    <input id="cWpw" type="password" autocomplete="new-password">
+    <label class="ck"><input type="checkbox" id="cOpen"> 开放网络（无密码）</label>
+   </div>
+  </fieldset>
+  <fieldset id="fsDev"><legend>设备</legend>
+   <div class="fl">
+    <label for="cHost">主机名</label>
+    <div><input id="cHost" type="text" autocapitalize="off" autocorrect="off" spellcheck="false"><small id="hostPrev"></small></div>
+    <label for="cApw">热点密码</label>
+    <input id="cApw" type="password" autocomplete="new-password">
+    <label for="cTok">访问令牌</label>
+    <input id="cTok" type="password" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label class="ck" id="lTokClr"><input type="checkbox" id="cTokClr"> 清除令牌（关闭鉴权）</label>
+    <label for="cDelay">按键间隔</label>
+    <div class="row"><input id="cDelay" class="num" type="number" min="0" max="1000" inputmode="numeric"> <small>ms（默认 5，BIOS 或慢速远程桌面可调大）</small></div>
+    <label class="ck"><input type="checkbox" id="cShow"> 显示密码</label>
+   </div>
+  </fieldset>
+  <div class="row" style="margin-bottom:12px"><span id="cfgMsg" class="msg" style="margin:0"></span><span class="sp"></span><button type="button" class="btn" id="bRb2" hidden>立即重启</button><button class="btn pri" id="bSave">保存设备设置</button></div>
+ </form>
+ <fieldset><legend>本机输入设置 <small>仅保存在此浏览器</small></legend>
+  <div class="fl">
+   <label for="sWheel">滚轮速度</label><div class="rng"><input id="sWheel" type="range" min="0.25" max="4" step="0.25"><output id="oWheel"></output></div>
+   <label for="sTs">触控板滚动</label><div class="rng"><input id="sTs" type="range" min="0.25" max="4" step="0.25"><output id="oTs"></output></div>
+   <label class="ck"><input type="checkbox" id="cNat"> 触控板自然滚动（内容跟随手指）</label>
+  </div>
+ </fieldset>
+ <fieldset><legend>设备信息</legend>
+  <dl id="info"></dl>
+  <div class="row" style="margin-top:10px"><button id="bReboot" class="btn">重启设备</button><button id="bForget" class="btn">清除本机保存的令牌</button></div>
+ </fieldset>
+</div></div>
+
+<div id="ovTok" class="ov" hidden><form id="fTok" class="sheet sm" role="dialog" aria-modal="true" aria-labelledby="tokH">
+ <div class="sh"><h2 id="tokH">需要访问令牌</h2></div>
+ <p style="margin:0 0 10px">设备已启用访问令牌，请输入令牌。令牌将保存在本浏览器中。</p>
+ <input id="tokIn" type="password" style="width:100%" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="访问令牌">
+ <div id="tokErr" class="err"></div>
+ <div class="row" style="margin-top:12px"><span class="sp"></span><button type="button" class="btn" data-close>取消</button><button class="btn pri">连接</button></div>
+</form></div>
+
+<script>
+(function () {
+'use strict';
+var $ = function (id) { return document.getElementById(id); };
+var now = function () { return performance.now(); };
+var isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
+
+/* ---------- storage ---------- */
+var store = {
+  get: function (k, d) { try { var v = localStorage.getItem('espkb.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set: function (k, v) { try { if (v === undefined || v === '') localStorage.removeItem('espkb.' + k); else localStorage.setItem('espkb.' + k, JSON.stringify(v)); } catch (e) {} }
+};
+var token = store.get('token', '');
+var prefs = Object.assign({ mouse: 1, pad: 1.5, wheel: 1, ts: 1, nat: true }, store.get('prefs', {}));
+function savePrefs() { store.set('prefs', prefs); }
+
+/* ---------- key tables ---------- */
+// KeyboardEvent.code -> HID keyboard usage (page 0x07)
+var CODE = { Enter: 40, Escape: 41, Backspace: 42, Tab: 43, Space: 44, Minus: 45, Equal: 46, BracketLeft: 47, BracketRight: 48,
+  Backslash: 49, IntlHash: 50, Semicolon: 51, Quote: 52, Backquote: 53, Comma: 54, Period: 55, Slash: 56, CapsLock: 57,
+  PrintScreen: 70, ScrollLock: 71, Pause: 72, Insert: 73, Home: 74, PageUp: 75, Delete: 76, End: 77, PageDown: 78,
+  ArrowRight: 79, ArrowLeft: 80, ArrowDown: 81, ArrowUp: 82, NumLock: 83, NumpadDivide: 84, NumpadMultiply: 85,
+  NumpadSubtract: 86, NumpadAdd: 87, NumpadEnter: 88, NumpadDecimal: 99, IntlBackslash: 100, ContextMenu: 101,
+  NumpadEqual: 103, Help: 117, Again: 121, Undo: 122, Cut: 123, Copy: 124, Paste: 125, Find: 126,
+  AudioVolumeMute: 127, AudioVolumeUp: 128, AudioVolumeDown: 129, VolumeMute: 127, VolumeUp: 128, VolumeDown: 129,
+  NumpadComma: 133, IntlRo: 135, KanaMode: 136, IntlYen: 137, Convert: 138, NonConvert: 139, Lang1: 144, Lang2: 145,
+  Lang3: 146, Lang4: 147, Lang5: 148, NumpadParenLeft: 182, NumpadParenRight: 183, NumpadBackspace: 187, NumpadClear: 216,
+  ControlLeft: 224, ShiftLeft: 225, AltLeft: 226, MetaLeft: 227, ControlRight: 228, ShiftRight: 229, AltRight: 230,
+  MetaRight: 231, OSLeft: 227, OSRight: 231 };
+// usage -> display name
+var NAME = { 40: 'Enter', 41: 'Esc', 42: 'Backspace', 43: 'Tab', 44: 'Space', 45: '-', 46: '=', 47: '[', 48: ']', 49: '\\', 50: '#',
+  51: ';', 52: "'", 53: '`', 54: ',', 55: '.', 56: '/', 57: 'CapsLock', 70: 'PrtSc', 71: 'ScrollLock', 72: 'Pause', 73: 'Insert',
+  74: 'Home', 75: 'PgUp', 76: 'Delete', 77: 'End', 78: 'PgDn', 79: '→', 80: '←', 81: '↓', 82: '↑', 83: 'NumLock', 84: 'Num/',
+  85: 'Num*', 86: 'Num-', 87: 'Num+', 88: 'NumEnter', 99: 'Num.', 100: 'ISO\\', 101: 'Menu', 224: 'LCtrl', 225: 'LShift',
+  226: 'LAlt', 227: 'LWin', 228: 'RCtrl', 229: 'RShift', 230: 'RAlt', 231: 'RWin' };
+// key names accepted by the device (docs/API.md section 8)
+var KN = {};
+'enter 40 return 40 esc 41 escape 41 backspace 42 bksp 42 tab 43 space 44 spacebar 44 minus 45 - 45 equal 46 = 46 lbracket 47 [ 47 rbracket 48 ] 48 backslash 49 \\ 49 semicolon 51 ; 51 quote 52 \' 52 grave 53 ` 53 comma 54 , 54 period 55 . 55 dot 55 slash 56 / 56 capslock 57 printscreen 70 prtsc 70 scrolllock 71 pause 72 insert 73 ins 73 home 74 pageup 75 pgup 75 delete 76 del 76 end 77 pagedown 78 pgdn 78 right 79 left 80 down 81 up 82 numlock 83 kp_divide 84 kp_multiply 85 kp_minus 86 kp_plus 87 kp_enter 88 kp_dot 99 menu 101 app 101 ctrl 224 lctrl 224 control 224 shift 225 lshift 225 alt 226 lalt 226 option 226 gui 227 lgui 227 win 227 meta 227 super 227 cmd 227 rctrl 228 rshift 229 ralt 230 altgr 230 rgui 231 rwin 231'
+  .split(' ').forEach(function (t, i, a) { if (i % 2 === 0) KN[t] = +a[i + 1]; });
+(function () {
+  var i;
+  for (i = 0; i < 26; i++) { var c = String.fromCharCode(97 + i); CODE['Key' + c.toUpperCase()] = 4 + i; KN[c] = 4 + i; NAME[4 + i] = c.toUpperCase(); }
+  for (i = 0; i < 10; i++) { var u = i ? 29 + i : 39; CODE['Digit' + i] = u; KN['' + i] = u; NAME[u] = '' + i; }
+  for (i = 1; i <= 24; i++) { u = i <= 12 ? 57 + i : 91 + i; CODE['F' + i] = u; KN['f' + i] = u; NAME[u] = 'F' + i; }
+  for (i = 0; i < 10; i++) { u = i ? 88 + i : 98; CODE['Numpad' + i] = u; KN['kp_' + i] = u; NAME[u] = 'Num' + i; }
+})();
+function keyName(u) { return NAME[u] || ('0x' + u.toString(16)); }
+function isMod(u) { return u >= 224 && u <= 231; }
+var BTN = ['left', 'middle', 'right', 'back', 'forward'];
+var BTN_CN = { left: '左键', middle: '中键', right: '右键', back: '后退键', forward: '前进键' };
+
+var ERR = {
+  bad_request: '请求格式或参数错误',
+  bad_step: '包含设备无法执行的动作（未知键名、不支持的字符或同时按住超过 6 个键）',
+  unauthorized: '访问令牌缺失或不正确',
+  forbidden: '来源检查未通过：请直接用设备 IP 或“主机名.local”打开本页（不要经过代理或端口转发）',
+  not_found: '接口不存在（固件版本可能与网页不匹配）',
+  method_not_allowed: '请求方法不正确（固件版本可能与网页不匹配）',
+  aborted: '任务已被急停中止',
+  too_large: '内容过长，超过设备上限',
+  busy: '设备任务队列已满，请稍后再试',
+  usb_not_ready: '目标电脑没有识别到 USB（未插好或已关机），操作未执行',
+  usb_suspended: '目标电脑处于休眠状态且不允许远程唤醒，请先唤醒目标电脑',
+  timeout: '目标电脑超过 1 秒没有接收按键报告，任务失败'
+};
+function errText(code, message, extra) {
+  var s = ERR[code] || (code && code.indexOf('http_') === 0 ? '设备返回 HTTP ' + code.slice(5) : '错误：' + code);
+  if (code === 'bad_step' && extra && extra.index != null) s += '（第 ' + (extra.index + 1) + ' 步' + (extra.offset != null ? '，文本第 ' + (extra.offset + 1) + ' 字节' : '') + '）';
+  if (message) s += '。设备说明：' + message;
+  return s;
+}
+
+/* ---------- toasts and log ---------- */
+var toasts = {}, logEl = $('log'), logCount = 0, lastLog = null;
+function fmtTime(d) { return d.toTimeString().slice(0, 8); }
+function addLog(msg, level) {
+  var t = Date.now();
+  if (lastLog && lastLog.msg === msg && t - lastLog.t < 30000) {
+    lastLog.n++; lastLog.t = t; lastLog.el.lastChild.textContent = msg + ' ×' + lastLog.n; return;
+  }
+  var li = document.createElement('li'), tm = document.createElement('time'), sp = document.createElement('span');
+  tm.textContent = fmtTime(new Date()); sp.textContent = msg; sp.className = level;
+  li.appendChild(tm); li.appendChild(sp); logEl.insertBefore(li, logEl.firstChild);
+  while (logEl.children.length > 100) logEl.removeChild(logEl.lastChild);
+  lastLog = { msg: msg, t: t, n: 1, el: li };
+  logCount++; $('logN').textContent = '（' + logCount + ' 条）';
+}
+function note(msg, level, key) {
+  level = level || 'info'; key = key || msg;
+  addLog(msg, level);
+  var t = toasts[key];
+  if (t) { t.n++; t.el.lastChild.textContent = '×' + t.n; t.el.firstChild.textContent = msg; clearTimeout(t.timer); }
+  else {
+    var el = document.createElement('div'), a = document.createElement('span'), b = document.createElement('span');
+    el.className = 'toast ' + level; a.textContent = msg; b.className = 'n'; el.appendChild(a); el.appendChild(b);
+    el.title = '点击关闭'; el.onclick = function () { dropToast(key); };
+    $('toasts').appendChild(el);
+    t = toasts[key] = { el: el, n: 1 };
+    var ks = Object.keys(toasts); if (ks.length > 4) dropToast(ks[0]);
+  }
+  t.timer = setTimeout(function () { dropToast(key); }, level === 'error' ? 9000 : 5000);
+}
+function dropToast(key) { var t = toasts[key]; if (!t) return; clearTimeout(t.timer); t.el.remove(); delete toasts[key]; }
+
+/* ---------- banners ---------- */
+function banner(id, cls, text, btn, fn) {
+  var el = $('bn-' + id);
+  if (!cls) { if (el) el.remove(); return; }
+  if (!el) { el = document.createElement('div'); el.id = 'bn-' + id; $('banners').appendChild(el); }
+  el.className = 'banner ' + cls;
+  el.textContent = '';
+  var s = document.createElement('span'); s.textContent = text; el.appendChild(s);
+  if (btn) { var b = document.createElement('button'); b.className = 'btn sm'; b.textContent = btn; b.onclick = fn; el.appendChild(b); }
+}
+
+/* ---------- HTTP ---------- */
+function api(method, path, body, timeout) {
+  var h = {};
+  if (token) h.Authorization = 'Bearer ' + token;
+  if (body !== undefined) h['Content-Type'] = 'application/json';
+  var ac = typeof AbortController === 'function' ? new AbortController() : null;
+  var tm = setTimeout(function () { if (ac) ac.abort(); }, timeout || 8000);
+  var status = 0;
+  return fetch(path, { method: method, headers: h, body: body === undefined ? undefined : JSON.stringify(body), signal: ac ? ac.signal : undefined, cache: 'no-store' })
+    .catch(function (e) {
+      var er = new Error(e && e.name === 'AbortError' ? '请求超时' : '无法连接设备'); er.code = 'network'; throw er;
+    })
+    .then(function (r) {
+      status = r.status;
+      return r.json().catch(function () { return null; });
+    })
+    .then(function (j) {
+      clearTimeout(tm);
+      if (status === 200 && j && j.ok !== false) { banner('forbid'); return j; }
+      var code = (j && j.error) || ('http_' + status);
+      var er = new Error(errText(code, j && j.message, j)); er.code = code; er.status = status; er.body = j;
+      if (status === 401) needToken(true);
+      else if (status === 403) banner('forbid', 'bad', ERR.forbidden);
+      throw er;
+    }, function (e) { clearTimeout(tm); throw e; });
+}
+
+/* ---------- WebSocket ---------- */
+var ws = null, wsOpenFlag = false, retryAt = 0, retryTimer = 0, backoff = 0, failCount = 0, waitingToken = false;
+var lastRx = 0, lastPing = 0, rtt = null, st = null, rebootAt = 0, connState = 'init';
+function wsOpen() { return !!ws && wsOpenFlag && ws.readyState === 1; }
+function wsSend(obj, quiet) {
+  if (!wsOpen()) { if (!quiet) note('未连接设备，操作未发送', 'warn', 'offline'); return false; }
+  ws.send(JSON.stringify(obj)); return true;
+}
+function connect() {
+  clearTimeout(retryTimer); retryTimer = 0; retryAt = 0;
+  if (ws || waitingToken) return;
+  var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws' + (token ? '?token=' + encodeURIComponent(token) : '');
+  var s;
+  try { s = new WebSocket(url); } catch (e) { scheduleRetry(); return; }
+  ws = s; wsOpenFlag = false; setConn('connecting');
+  s.onopen = function () {
+    if (ws !== s) return;
+    wsOpenFlag = true; lastRx = now();
+    banner('ws'); banner('auth401');
+    if (rebootAt) { rebootAt = 0; banner('reboot2'); note('设备已重新连接', 'ok'); }
+    setConn('open'); sendPing();
+    api('GET', '/api/config').then(function (c) { cfgDelay = c.key_delay_ms; }, function () {});
+  };
+  // reset backoff only once the device talks, so an accept-then-close loop still backs off
+  s.onmessage = function (ev) { if (ws === s) { lastRx = now(); backoff = failCount = 0; onMessage(ev.data); } };
+  s.onclose = function () { if (ws === s) dropWs(); };
+}
+function dropWs() {
+  var s = ws, opened = wsOpenFlag;
+  ws = null; wsOpenFlag = false;
+  if (s) { s.onclose = s.onmessage = s.onopen = null; try { s.close(); } catch (e) {} }
+  lostState();
+  if (opened) { note('与设备的连接已断开，正在重连', 'warn', 'lost'); scheduleRetry(); return; }
+  failCount++;
+  setConn('retry');
+  // a failed handshake looks the same for 401/403/offline; ask HTTP which it is
+  api('GET', '/api/status', undefined, 5000).then(function (j) {
+    applyStatus(j);
+    if (failCount >= 3) banner('ws', 'warn', '设备在线，但实时连接（WebSocket）建立失败。设备最多同时允许 4 个连接，请关闭其它控制页面后重试。');
+    scheduleRetry();
+  }, function (e) {
+    if (e.status === 401) return;           // token dialog shown by api()
+    scheduleRetry();
+  });
+}
+function scheduleRetry() {
+  if (ws || waitingToken || retryTimer) return;
+  var d = rebootAt && now() - rebootAt < 90000 ? 1000 : Math.min(8000, 500 * Math.pow(2, backoff++));
+  d = Math.round(d * (0.8 + Math.random() * 0.4));
+  retryAt = now() + d; retryTimer = setTimeout(connect, d);
+  setConn('retry');
+}
+function reconnectNow() { backoff = 0; clearTimeout(retryTimer); retryTimer = 0; connect(); }
+function setConn(s) { connState = s; renderConn(); capUI(); textUI(); }
+function renderConn() {
+  var p = $('pConn'), t = $('connTxt'), cls = '', txt;
+  if (connState === 'open') { cls = rtt != null && rtt > 150 ? 'warn' : 'ok'; txt = '已连接' + (rtt != null ? ' · ' + Math.round(rtt) + ' ms' : ''); }
+  else if (connState === 'connecting') { txt = '连接中…'; }
+  else if (connState === 'auth') { cls = 'bad'; txt = '需要令牌'; }
+  else if (connState === 'retry') { cls = 'bad'; txt = retryAt ? '已断开 · ' + Math.max(1, Math.ceil((retryAt - now()) / 1000)) + ' 秒后重连' : '已断开'; }
+  else txt = '连接中…';
+  p.className = 'pill ' + cls + (connState === 'retry' ? ' click' : '');
+  p.title = connState === 'retry' ? '点击立即重连' : '与设备的连接（往返延迟）';
+  t.textContent = txt;
+}
+$('pConn').onclick = function () { if (connState === 'retry') reconnectNow(); };
+function sendPing() { lastPing = now(); wsSend({ ping: Math.round(lastPing * 10) / 10 }, true); }
+function onMessage(data) {
+  var m; try { m = JSON.parse(data); } catch (e) { return; }
+  if (!m || typeof m !== 'object') return;
+  if (m.status) applyStatus(m.status);
+  else if ('pong' in m) {
+    if (typeof m.pong === 'number') { var r = now() - m.pong; if (r >= 0 && r < 60000) { rtt = rtt == null ? r : rtt * 0.7 + r * 0.3; renderConn(); } }
+  } else if ('ack' in m) onAck(m);
+  else if (m.error) note(errText(m.error, m.message, m), m.error === 'usb_not_ready' || m.error === 'busy' ? 'warn' : 'error', 'e:' + m.error);
+}
+// called when the connection is gone: the device releases everything this connection held
+function lostState() {
+  K.m.clear(); B.m.clear(); heldChanged();
+  mx = my = sv = sh = 0;
+  if (job) endText('与设备的连接断开');
+  setConn('retry');
+}
+
+/* ---------- hold tracking (reference counted per source) ---------- */
+// sources: kbd = physical keyboard, lock = pointer-locked mouse, latch = latched modifier,
+//          osk = on-screen key, pad = on-screen mouse button, drag = drag latch
+function Holder(kind) { this.kind = kind; this.m = new Map(); this.t = new Map(); }
+Holder.prototype.msg = function (id, action) { return this.kind === 'key' ? { key: id, action: action } : { button: id, action: action }; };
+Holder.prototype.down = function (id, src) {
+  var s = this.m.get(id);
+  if (s) { s.add(src); heldChanged(); return true; }
+  if (!wsOpen()) { note('未连接设备，操作未发送', 'warn', 'offline'); return false; }
+  if (this.kind === 'key' && !isMod(id) && this.nonMod() >= 6) { note('最多同时按住 6 个普通键，多出的键已忽略', 'warn', 'six'); return false; }
+  if (this.kind === 'button') flush();
+  this.m.set(id, new Set([src])); this.t.set(id, now());
+  wsSend(this.msg(id, 'down')); heldChanged(); return true;
+};
+Holder.prototype.up = function (id, src) {
+  var s = this.m.get(id);
+  if (!s || !s.delete(src)) return false;
+  if (!s.size) { this.m.delete(id); this.t.delete(id); if (this.kind === 'button') flush(); wsSend(this.msg(id, 'up'), true); }
+  heldChanged(); return true;
+};
+Holder.prototype.has = function (id, src) { var s = this.m.get(id); return !!s && (src ? s.has(src) : true); };
+Holder.prototype.release = function (pred) {
+  var self = this;
+  Array.from(this.m).forEach(function (e) { Array.from(e[1]).forEach(function (src) { if (!pred || pred(src, e[0])) self.up(e[0], src); }); });
+};
+// drop entries the device no longer reports as held (emergency stop by another client, failed task,
+// USB re-enumeration); the age check avoids racing a status push generated before our "down" arrived
+Holder.prototype.sync = function (list) {
+  var self = this, gone = false;
+  this.m.forEach(function (s, id) { if (list.indexOf(id) < 0 && now() - (self.t.get(id) || 0) > 1500) { self.m.delete(id); self.t.delete(id); gone = true; } });
+  return gone;
+};
+Holder.prototype.nonMod = function () { var n = 0; this.m.forEach(function (v, k) { if (!isMod(k)) n++; }); return n; };
+var K = new Holder('key'), B = new Holder('button');
+function holding() { return K.m.size > 0 || B.m.size > 0; }
+function heldChanged() {
+  var parts = [];
+  K.m.forEach(function (s, u) { parts.push(keyName(u) + (s.has('latch') ? '(锁定)' : '')); });
+  B.m.forEach(function (s, b) { parts.push(BTN_CN[b] + (s.has('drag') ? '(拖动)' : '')); });
+  var el = $('mine'); el.textContent = '本页按住：' + (parts.join(' ') || '无'); el.className = 'mine' + (parts.length ? ' on' : '');
+  Array.prototype.forEach.call(document.querySelectorAll('[data-l]'), function (b) {
+    var on = K.has(+b.dataset.l, 'latch'); b.classList.toggle('on', on); b.setAttribute('aria-pressed', on);
+  });
+  var lat = []; K.m.forEach(function (s, u) { if (s.has('latch')) lat.push(keyName(u).replace(/^L/, '')); });
+  $('txtLatch').hidden = !lat.length;
+  $('txtLatch').textContent = '已锁定 ' + lat.join('+') + '：发送的文字会与它组合（例如 Ctrl + c = 复制），发送后自动解锁。';
+  var d = B.has('left', 'drag');
+  $('bDrag').classList.toggle('on', d); $('bDrag').setAttribute('aria-pressed', d); $('bDrag').textContent = d ? '拖动中（点击松开）' : '拖动锁定';
+  $('pad').classList.toggle('drag', d);
+  $('padT').textContent = d ? '左键已按住：拖动手指移动，轻点触控板或再次点击“拖动中”松开' : '单指拖动：移动 · 轻点：左键 · 双指轻点：右键 · 双指拖动：滚动';
+}
+function releaseLatches() { K.release(function (s) { return s === 'latch'; }); }
+function releaseCapture() { K.release(function (s) { return s === 'kbd'; }); B.release(function (s) { return s === 'lock'; }); }
+function releaseAll() { flush(); K.release(); B.release(); }
+function tapKey(u) { if (wsSend({ key: u }) && !isMod(u)) releaseLatches(); }
+
+/* ---------- keep-alive / latency / watchdog ---------- */
+setInterval(function () {
+  var t = now();
+  if (wsOpen()) {
+    if (t - lastPing >= (holding() ? 180 : 1000)) sendPing();
+    if (t - lastRx > 5000) { note('设备无响应，正在重连', 'warn', 'lost'); dropWs(); }
+  } else if (connState === 'retry' && retryAt) renderConn();
+}, 50);
+
+/* ---------- status ---------- */
+var setupShown = false;
+function pill(el, cls, txt) { el.className = 'pill ' + cls; el.lastChild.textContent = txt; }
+function applyStatus(s) {
+  if (!s || !s.usb) return;
+  st = s;
+  var u = s.usb, w = s.wifi || {}, h = s.hid || {};
+  if (!u.mounted) pill($('pUsb'), 'bad', 'USB 未连接');
+  else if (u.suspended) pill($('pUsb'), 'warn', 'USB 已挂起（休眠）');
+  else pill($('pUsb'), 'ok', 'USB 已连接' + (u.kbd_protocol === 'boot' ? ' · boot' : ''));
+  $('bWake').hidden = !(u.mounted && u.suspended);
+  var leds = u.leds || {};
+  $('lNum').className = leds.num ? 'on' : ''; $('lCaps').className = leds.caps ? 'on' : ''; $('lScr').className = leds.scroll ? 'on' : '';
+  var pw = $('pWifi');
+  pw.textContent = '';
+  if (w.sta_connected) {
+    var r = w.rssi, n = r >= -55 ? 4 : r >= -67 ? 3 : r >= -75 ? 2 : r >= -85 ? 1 : 0;
+    var bars = document.createElement('span'); bars.className = 'bars';
+    for (var i = 0; i < 4; i++) { var b = document.createElement('b'); if (i < n) b.className = 'on'; bars.appendChild(b); }
+    pw.appendChild(bars); pw.appendChild(document.createTextNode((w.ssid || 'WiFi') + ' ' + r + ' dBm'));
+    pw.className = 'pill ' + (n >= 2 ? 'ok' : 'warn'); pw.title = 'IP ' + (w.ip || '') + ' · 信号 ' + r + ' dBm';
+  } else { pw.textContent = w.ap_active ? '热点模式 ' + (w.ap_ssid || '') : 'WiFi 未连接'; pw.className = 'pill warn'; pw.title = ''; }
+  var names = (h.keys || []).map(keyName).concat((h.buttons || []).map(function (b) { return BTN_CN[b] || b; }));
+  var ph = $('pHeld'); ph.textContent = '设备按住：' + (names.join(' ') || '无'); ph.className = 'pill' + (names.length ? ' on' : '');
+  if (h.queued) ph.textContent += ' · 排队 ' + h.queued;
+  if (wsOpen() && (K.sync(h.keys || []) | B.sync(h.buttons || []))) { heldChanged(); note('设备已松开本页按住的键（可能是急停或任务失败），已同步', 'warn', 'sync'); }
+  if (s.auth_required === false) banner('auth', 'warn', '未设置访问令牌：同一网络中的任何人都能打开此页面并控制目标电脑。', '设置令牌', function () { openSettings('tok'); });
+  else banner('auth');
+  if (!w.sta_connected) {
+    banner('setup', 'info', '设备未连接 WiFi 路由器' + (w.ap_active ? '，配网热点“' + (w.ap_ssid || '') + '”已开启' : '') + '。', '配置 WiFi', function () { openSettings('wifi'); });
+    if (!setupShown && !w.ssid && !store.get('setupSeen', false)) { setupShown = true; store.set('setupSeen', true); openSettings('wifi'); }
+  } else banner('setup');
+  if (s.ws_clients > 1) $('pConn').title = '共有 ' + s.ws_clients + ' 个客户端连接到设备';
+  capUI();
+  if (!$('ovSet').hidden) fillInfo();
+}
+$('bWake').onclick = function () {
+  api('POST', '/api/wake').then(function () { note('已发送唤醒信号', 'ok'); }, function (e) { note('唤醒失败：' + e.message, 'error'); });
+};
+$('bStop').onclick = function () {
+  if (wsSend({ release: true }, true)) note('已急停：设备队列已清空，所有按键已松开', 'ok', 'stop');
+  else api('POST', '/api/release').then(function () { note('已急停：设备队列已清空，所有按键已松开', 'ok', 'stop'); }, function (e) { note('急停失败：' + e.message, 'error'); });
+  K.m.clear(); B.m.clear(); heldChanged();
+  if (job) job.stop = true;
+};
+
+/* ---------- capture area: keyboard ---------- */
+var cap = $('cap'), capsT = -1e9;
+var canLock = 'requestPointerLock' in cap && !matchMedia('(pointer:coarse)').matches;
+function locked() { return document.pointerLockElement === cap; }
+function fixMods(e, u) {
+  // release modifiers whose keyup we missed (e.g. both Shift keys on Windows)
+  var stt = [e.ctrlKey, e.shiftKey, e.altKey, e.metaKey];
+  for (var i = 0; i < 8; i++) { var m = 224 + i; if (m !== u && !stt[i % 4] && K.has(m, 'kbd')) K.up(m, 'kbd'); }
+}
+cap.addEventListener('keydown', function (e) {
+  var u = CODE[e.code];
+  if (u === undefined || e.isComposing) return;
+  e.preventDefault();
+  if (e.repeat) return;                      // the target does its own auto-repeat
+  if (u === 41 && locked()) return;          // Esc only leaves pointer lock
+  fixMods(e, u);
+  if (u === 57) { capsT = e.timeStamp; tapKey(57); return; }
+  if (isMac && e.metaKey && !isMod(u)) { tapKey(u); return; } // macOS: no keyup arrives while Cmd is held
+  K.down(u, 'kbd');
+});
+cap.addEventListener('keyup', function (e) {
+  var u = CODE[e.code];
+  if (u === undefined) return;
+  e.preventDefault();
+  if (u === 57) { if (isMac && e.timeStamp - capsT > 600) tapKey(57); return; } // macOS sends CapsLock off as keyup only
+  if (!K.has(u, 'kbd')) { if (u === 70) tapKey(70); fixMods(e, u); return; }   // Windows: PrintScreen has keyup only
+  K.up(u, 'kbd');
+  if (isMac && (u === 227 || u === 231)) K.release(function (s, id) { return s === 'kbd' && !isMod(id); });
+  fixMods(e, u);
+  if (!isMod(u)) releaseLatches();
+});
+cap.addEventListener('focus', capUI);
+cap.addEventListener('blur', function () { releaseCapture(); if (locked()) document.exitPointerLock(); capUI(); });
+function capUI() {
+  var f = document.activeElement === cap, l = locked(), on = wsOpen();
+  cap.className = l ? 'lock' : f ? 'kbd' : '';
+  $('capT').textContent = !on ? '未连接设备' : l ? '键盘 + 鼠标捕获中' : f ? '键盘捕获中' : (canLock ? '点击这里开始控制' : '点击这里使用外接键盘');
+  $('capS').textContent = l ? '按键和鼠标正在发送到目标电脑 · 按 Esc 释放鼠标' :
+    f ? '按键正在发送到目标电脑（包括 Esc）· 点击区域外停止' + (canLock ? ' · 点击区域内锁定鼠标' : '') :
+    canLock ? '键盘和鼠标将发送到目标电脑' : '外接键盘的按键将发送到目标电脑';
+  $('capU').hidden = !(on && st && !st.usb.mounted);
+  document.title = (f || l) && on ? '● 捕获中 · ESPKB' : 'ESPKB';
+}
+$('bKbOnly').onclick = function () { if (locked()) document.exitPointerLock(); cap.focus(); };
+
+/* ---------- capture area: mouse (pointer lock) ---------- */
+var mx = 0, my = 0, sv = 0, sh = 0, raf = 0;
+function lockFail() { note('浏览器暂时拒绝锁定鼠标，请稍候再点击捕获区', 'warn', 'lock'); }
+function lockPointer() {
+  if (!canLock) return;
+  var p;
+  try { p = cap.requestPointerLock({ unadjustedMovement: true }); }
+  catch (e) { try { p = cap.requestPointerLock(); } catch (e2) { lockFail(); return; } }
+  if (p && p.catch) p.catch(function (err) {
+    if (err && err.name === 'NotSupportedError') { var q = cap.requestPointerLock(); if (q && q.catch) q.catch(lockFail); }
+    else lockFail();
+  });
+}
+cap.addEventListener('mousedown', function (e) {
+  e.preventDefault();
+  if (!locked()) { cap.focus(); if (e.button === 0) lockPointer(); return; }
+  var b = BTN[e.button]; if (b) B.down(b, 'lock');
+});
+cap.addEventListener('mouseup', function (e) { e.preventDefault(); var b = BTN[e.button]; if (b) B.up(b, 'lock'); });
+cap.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+cap.addEventListener('auxclick', function (e) { e.preventDefault(); });
+document.addEventListener('pointerlockchange', function () { if (!locked()) { releaseCapture(); mx = my = 0; } capUI(); });
+document.addEventListener('pointerlockerror', lockFail);
+document.addEventListener('mousemove', function (e) {
+  if (!locked()) return;
+  mx += e.movementX * prefs.mouse; my += e.movementY * prefs.mouse; sched();
+});
+cap.addEventListener('wheel', function (e) {
+  if (!locked()) return;
+  e.preventDefault();
+  var k = (e.deltaMode === 1 ? 1 / 3 : e.deltaMode === 2 ? 3 : 1 / 100) * prefs.wheel; // notches per unit
+  addScroll(-e.deltaY * k, e.deltaX * k);
+}, { passive: false });
+function addScroll(v, h) {
+  if (v && (v > 0) !== (sv > 0)) sv = 0;   // drop leftover fraction on direction change
+  if (h && (h > 0) !== (sh > 0)) sh = 0;
+  sv += v; sh += h; sched();
+}
+function clamp(v) { return Math.max(-32767, Math.min(32767, v)); }
+function sched() { if (!raf) raf = requestAnimationFrame(flush); }
+function flush() {
+  if (raf) { cancelAnimationFrame(raf); raf = 0; }
+  if (!wsOpen()) { mx = my = sv = sh = 0; return; }
+  if (ws.bufferedAmount > 8192) { sched(); return; } // congested: keep accumulating
+  var dx = Math.trunc(mx), dy = Math.trunc(my);
+  if (dx || dy) { mx -= dx; my -= dy; wsSend({ move: [clamp(dx), clamp(dy)] }, true); }
+  var v = Math.trunc(sv), h = Math.trunc(sh);
+  if (v || h) { sv -= v; sh -= h; wsSend({ scroll: [clamp(v), clamp(h)] }, true); }
+}
+
+/* ---------- touchpad ---------- */
+var pad = $('pad'), pts = new Map(), gest = null;
+pad.addEventListener('pointerdown', function (e) {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();
+  try { pad.setPointerCapture(e.pointerId); } catch (x) {}
+  if (!pts.size) gest = { t0: e.timeStamp, n: 0, moved: false, scroll: false };
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t: e.timeStamp });
+  gest.n = Math.max(gest.n, pts.size);
+});
+pad.addEventListener('pointermove', function (e) {
+  var p = pts.get(e.pointerId); if (!p || !gest) return;
+  e.preventDefault();
+  var dx = e.clientX - p.x, dy = e.clientY - p.y, dt = Math.max(1, e.timeStamp - p.t);
+  p.x = e.clientX; p.y = e.clientY; p.t = e.timeStamp;
+  if (!gest.moved) {
+    if (Math.abs(p.x - p.x0) + Math.abs(p.y - p.y0) < 10) return; // tap slop
+    gest.moved = true; dx = p.x - p.x0; dy = p.y - p.y0;
+  }
+  if (pts.size > 1 || gest.scroll) {
+    gest.scroll = true;
+    var f = prefs.ts / 30 / Math.max(1, pts.size) * (prefs.nat ? 1 : -1);
+    addScroll(dy * f, -dx * f);
+  } else {
+    var v = Math.sqrt(dx * dx + dy * dy) / dt;           // px per ms
+    var g = prefs.pad * Math.min(3, 1 + Math.max(0, v - 0.25) * 1.5);
+    mx += dx * g; my += dy * g; sched();
+  }
+});
+function padEnd(e) {
+  if (!pts.delete(e.pointerId) || pts.size || !gest) return;
+  var g = gest; gest = null;
+  if (e.type === 'pointerup' && !g.moved && e.timeStamp - g.t0 < 300) padTap(g.n);
+}
+pad.addEventListener('pointerup', padEnd);
+pad.addEventListener('pointercancel', padEnd);
+pad.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+['touchstart', 'touchmove', 'gesturestart'].forEach(function (t) { pad.addEventListener(t, function (e) { e.preventDefault(); }, { passive: false }); });
+function padTap(n) {
+  var b = n >= 3 ? 'middle' : n === 2 ? 'right' : 'left';
+  if (b === 'left' && B.has('left', 'drag')) { B.up('left', 'drag'); return; }
+  if (B.has(b)) return;   // held by an on-screen button; a click would release it
+  flush(); wsSend({ click: b });
+}
+Array.prototype.forEach.call(document.querySelectorAll('[data-b]'), function (el) {
+  var b = el.dataset.b, pid = null;
+  el.addEventListener('pointerdown', function (e) {
+    if (e.button) return;
+    e.preventDefault(); pid = e.pointerId;
+    try { el.setPointerCapture(e.pointerId); } catch (x) {}
+    if (B.down(b, 'pad')) el.classList.add('on');
+  });
+  function end(e) { if (e.pointerId !== pid) return; pid = null; el.classList.remove('on'); B.up(b, 'pad'); }
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end); el.addEventListener('lostpointercapture', end);
+  el.addEventListener('click', function (e) { if (e.detail === 0) wsSend({ click: b }); });
+  el.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+});
+$('bDrag').onclick = function () { if (B.has('left', 'drag')) B.up('left', 'drag'); else B.down('left', 'drag'); };
+$('bDrag').addEventListener('pointerdown', function (e) { e.preventDefault(); });
+
+/* ---------- on-screen keys ---------- */
+function mkKey(parent, u, label, latch) {
+  var b = document.createElement('button');
+  b.type = 'button'; b.className = 'k' + (latch ? ' lat' : ''); b.textContent = label;
+  if (latch) {
+    b.dataset.l = u; b.title = '点击锁定 / 解锁';
+    b.addEventListener('pointerdown', function (e) { e.preventDefault(); }); // keep focus in the capture area
+    b.onclick = function () { if (K.has(u, 'latch')) K.up(u, 'latch'); else K.down(u, 'latch'); };
+  } else bindKey(b, u);
+  parent.appendChild(b);
+}
+// press-and-hold for mouse/pen; touch taps on release (so scrolling the page over keys never presses one),
+// a long touch press holds the key
+function bindKey(el, u) {
+  var pid = null, timer = 0, down = false;
+  el.addEventListener('pointerdown', function (e) {
+    if (pid !== null || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    e.preventDefault(); pid = e.pointerId; el.classList.add('on');
+    try { el.setPointerCapture(e.pointerId); } catch (x) {}
+    if (e.pointerType === 'touch') timer = setTimeout(function () { timer = 0; down = K.down(u, 'osk'); }, 350);
+    else down = K.down(u, 'osk');
+  });
+  function end(e) {
+    if (e.pointerId !== pid) return;
+    pid = null; el.classList.remove('on');
+    if (timer) { clearTimeout(timer); timer = 0; if (e.type === 'pointerup') tapKey(u); }
+    else if (down) { down = false; if (K.up(u, 'osk') && !isMod(u)) releaseLatches(); }
+  }
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end); el.addEventListener('lostpointercapture', end);
+  el.addEventListener('click', function (e) { if (e.detail === 0) tapKey(u); });
+  el.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+}
+[[224, 'Ctrl'], [225, 'Shift'], [226, 'Alt'], [227, 'Win']].forEach(function (k) { mkKey($('kMods'), k[0], k[1], true); });
+[[41, 'Esc'], [43, 'Tab'], [40, 'Enter'], [42, 'Backspace'], [76, 'Delete'], [73, 'Insert'], [74, 'Home'], [77, 'End'], [75, 'PgUp'],
+ [78, 'PgDn'], [70, 'PrtSc'], [227, 'Win'], [101, 'Menu'], [57, 'CapsLock'], [83, 'NumLock'], [44, 'Space']].forEach(function (k) { mkKey($('kMain'), k[0], k[1]); });
+[[82, '↑'], [80, '←'], [81, '↓'], [79, '→']].forEach(function (k) { mkKey($('kArr'), k[0], k[1]); });
+for (var fi = 1; fi <= 12; fi++) mkKey($('kF'), 57 + fi, 'F' + fi);
+Array.prototype.forEach.call(document.querySelectorAll('#kArr .k'), function (b, i) { b.setAttribute('aria-label', ['上', '左', '下', '右'][i]); });
+
+/* ---------- combos ---------- */
+var DEF_COMBOS = ['ctrl+alt+del', 'alt+tab', 'alt+f4', 'gui+r', 'gui+d', 'gui+l', 'ctrl+shift+esc', 'ctrl+alt+t'];
+var combos = store.get('combos', []);
+if (!Array.isArray(combos)) combos = [];
+var PRETTY = { ctrl: 'Ctrl', lctrl: 'Ctrl', control: 'Ctrl', rctrl: 'RCtrl', shift: 'Shift', lshift: 'Shift', rshift: 'RShift',
+  alt: 'Alt', lalt: 'Alt', option: 'Alt', ralt: 'AltGr', altgr: 'AltGr', gui: 'Win', lgui: 'Win', win: 'Win', meta: 'Win', super: 'Win',
+  cmd: 'Win', rgui: 'RWin', rwin: 'RWin', esc: 'Esc', escape: 'Esc', del: 'Del', delete: 'Del', pgup: 'PgUp', pageup: 'PgUp',
+  pgdn: 'PgDn', pagedown: 'PgDn', prtsc: 'PrtSc', printscreen: 'PrtSc', bksp: 'Backspace' };
+function pretty(c) { return c.split('+').map(function (p) { return PRETTY[p] || (p.length === 1 ? p.toUpperCase() : p.charAt(0).toUpperCase() + p.slice(1)); }).join('+'); }
+function parseCombo(s) {
+  s = s.trim().toLowerCase().replace(/\s+/g, '');
+  if (!s) return { err: '请输入组合键' };
+  var parts = s.split('+'), nm = 0;
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i];
+    if (!p) return { err: '格式不对：“+”两边都要有键名（加号本身请用 shift+=）' };
+    if (!(p in KN)) return { err: '未知键名“' + p + '”。可用：a–z、0–9、f1–f24、ctrl、shift、alt、win、enter、esc、tab、space、del、home、end、pgup、pgdn、up/down/left/right 等' };
+    if (!isMod(KN[p])) nm++;
+  }
+  if (nm > 6) return { err: '普通键最多 6 个' };
+  return { combo: s };
+}
+function renderCombos() {
+  var box = $('combos'); box.textContent = '';
+  DEF_COMBOS.concat(combos).forEach(function (c, i) {
+    var w = document.createElement('span'), b = document.createElement('button');
+    w.className = 'combo'; b.type = 'button'; b.textContent = pretty(c); b.title = '发送 ' + c;
+    b.addEventListener('pointerdown', function (e) { e.preventDefault(); });
+    b.onclick = function () { if (wsSend({ key: c })) releaseLatches(); };
+    w.appendChild(b);
+    if (i >= DEF_COMBOS.length) {
+      var x = document.createElement('button'); x.type = 'button'; x.className = 'x'; x.textContent = '×'; x.title = '删除'; x.setAttribute('aria-label', '删除 ' + pretty(c));
+      x.onclick = function () { combos.splice(i - DEF_COMBOS.length, 1); store.set('combos', combos); renderCombos(); };
+      w.appendChild(x);
+    }
+    box.appendChild(w);
+  });
+}
+$('fCombo').onsubmit = function (e) {
+  e.preventDefault();
+  var r = parseCombo($('iCombo').value);
+  if (r.err) { $('comboErr').textContent = r.err; return; }
+  if (DEF_COMBOS.concat(combos).indexOf(r.combo) >= 0) { $('comboErr').textContent = '已存在'; return; }
+  combos.push(r.combo); store.set('combos', combos); renderCombos();
+  $('iCombo').value = ''; $('comboErr').textContent = '';
+};
+renderCombos();
+
+/* ---------- text ---------- */
+var txt = $('txt'), job = null, jobSeq = 0, cfgDelay = null;
+var FIX = { '‘': "'", '’': "'", '‚': "'", '‛': "'", '′': "'", '“': '"', '”': '"', '„': '"', '‟': '"', '″': '"',
+  '‐': '-', '‑': '-', '‒': '-', '–': '-', '—': '-', '―': '-', '−': '-', '…': '...', '。': '.', '、': ',',
+  '《': '<', '》': '>', '「': '"', '」': '"', '『': '"', '』': '"', '【': '[', '】': ']', '〔': '[', '〕': ']', '·': '`' };
+function fixChar(ch) {
+  var c = ch.codePointAt(0);
+  if (c >= 0xff01 && c <= 0xff5e) return String.fromCharCode(c - 0xfee0);   // full-width ASCII
+  if (c === 0x3000 || c === 0xa0 || (c >= 0x2000 && c <= 0x200a) || c === 0x202f || c === 0x205f) return ' ';
+  if (c === 0x200b || c === 0x200c || c === 0x200d || c === 0xfeff || c === 0xad) return '';
+  return FIX[ch] !== undefined ? FIX[ch] : null;
+}
+function okChar(c) { return (c >= 32 && c <= 126) || c === 9 || c === 10 || c === 13 || c === 8 || c === 27; }
+function badChars(s) {
+  var map = new Map(), line = 1, col = 0;
+  for (var ch of s) {
+    var c = ch.codePointAt(0); col++;
+    if (c === 10) { line++; col = 0; continue; }
+    if (okChar(c)) continue;
+    var e = map.get(ch); if (e) e.n++; else map.set(ch, { ch: ch, c: c, n: 1, line: line, col: col });
+  }
+  return Array.from(map.values());
+}
+function showChar(b) {
+  var h = 'U+' + b.c.toString(16).toUpperCase().padStart(4, '0');
+  var inv = /\s/.test(b.ch) || b.c < 32 || (b.c >= 127 && b.c <= 160) || b.c === 0xad || (b.c >= 0x200b && b.c <= 0x200d) || b.c === 0xfeff;
+  return (inv ? '（不可见字符）' : '「' + b.ch + '」') + ' ' + h;
+}
+function txtMsg(text, cls, extra) {
+  var m = $('txtMsg'); m.className = 'msg ' + (cls || ''); m.textContent = text || '';
+  if (extra) m.appendChild(extra);
+}
+function showBad(list) {
+  var lines = list.slice(0, 12).map(function (b) { return showChar(b) + (b.n > 1 ? ' ×' + b.n : '') + '（第 ' + b.line + ' 行第 ' + b.col + ' 列）'; });
+  if (list.length > 12) lines.push('……等共 ' + list.length + ' 种');
+  var row = document.createElement('div'); row.className = 'row';
+  var fixable = list.filter(function (b) { return fixChar(b.ch) !== null; }).length;
+  function btn(label, fn) { var b = document.createElement('button'); b.type = 'button'; b.className = 'btn sm'; b.textContent = label; b.onclick = fn; row.appendChild(b); }
+  if (fixable) btn('替换为相近的 ASCII 字符（' + fixable + ' 种）', function () { cleanText(false); });
+  btn('删除所有不支持的字符', function () { cleanText(true); });
+  txtMsg('未发送：以下字符设备无法输入（只支持美式键盘的 ASCII 字符）：' + lines.join('；'), 'err', row);
+}
+function cleanText(drop) {
+  var out = '', n = 0;
+  for (var ch of txt.value) {
+    var c = ch.codePointAt(0);
+    if (okChar(c)) { out += ch; continue; }
+    var f = fixChar(ch); n++;
+    out += f !== null ? f : (drop ? '' : ch);
+  }
+  txt.value = out;
+  var rest = badChars(out);
+  if (rest.length) showBad(rest); else txtMsg('已处理 ' + n + ' 个字符，请检查后再发送', 'ok');
+}
+function textUI() {
+  $('bSend').disabled = !!job || connState !== 'open';
+  $('bAbort').hidden = !job;
+  $('prog').hidden = !job;
+}
+function sendText() {
+  if (job) return;
+  var s = txt.value;
+  if ($('cEnter').checked) s += '\n';
+  s = s.replace(/\r\n?/g, '\n');
+  if (!s) { txtMsg('没有要发送的内容', 'warn'); return; }
+  var bad = badChars(s);
+  if (bad.length) { showBad(bad); return; }
+  var dv = $('iDelay').value.trim(), delay = null;
+  if (dv !== '') { delay = Number(dv); if (!(delay >= 0 && delay <= 1000 && Math.floor(delay) === delay)) { txtMsg('每键间隔需为 0–1000 之间的整数', 'err'); return; } }
+  if (!wsOpen()) { txtMsg('未连接设备', 'err'); return; }
+  // split into chunks of roughly one second of typing so "中止" takes effect quickly
+  // and every frame stays far below the 8192-byte WebSocket limit
+  var d = delay != null ? delay : cfgDelay != null ? cfgDelay : 5;
+  var n = Math.max(16, Math.min(600, Math.floor(1000 / (2 * d + 3)))), chunks = [];
+  for (var i = 0; i < s.length; i += n) chunks.push(s.slice(i, i + n));
+  job = { id: ++jobSeq, chunks: chunks, i: 0, done: 0, total: s.length, delay: delay, cur: null, stop: false, t0: now(), tries: 0 };
+  txtMsg('正在发送… 0 / ' + s.length);
+  textUI(); progress(); pumpText();
+}
+function pumpText() {
+  if (!job) return;
+  if (job.stop || job.i >= job.chunks.length) { endText(); return; }
+  var id = 't' + job.id + '-' + job.i, m = { text: job.chunks[job.i], id: id };
+  if (job.delay != null) m.delay_ms = job.delay;
+  if (!wsSend(m, true)) { endText('与设备的连接断开'); return; }
+  job.cur = id;
+}
+function onAck(a) {
+  if (!job || a.ack !== job.cur) return;
+  job.cur = null;
+  if (a.ok) { job.done += job.chunks[job.i].length; job.i++; job.tries = 0; progress(); pumpText(); }
+  else if (a.error === 'busy' && !job.stop && job.tries++ < 20) {
+    var jid = job.id; setTimeout(function () { if (job && job.id === jid && !job.cur) pumpText(); }, 300);
+  } else endText(errText(a.error, a.message, a));
+}
+function progress() {
+  $('prog').firstChild.style.width = (job.total ? 100 * job.done / job.total : 0) + '%';
+  if (!job.stop) txtMsg('正在发送… ' + job.done + ' / ' + job.total);
+}
+function endText(err) {
+  var j = job; if (!j) return;
+  job = null; textUI();
+  releaseLatches();
+  if (err) txtMsg('发送失败：' + err + '（已发送 ' + j.done + ' / ' + j.total + ' 个字符）', 'err');
+  else if (j.done < j.total) txtMsg('已中止：已发送 ' + j.done + ' / ' + j.total + ' 个字符', 'warn');
+  else { txtMsg('已发送 ' + j.total + ' 个字符，用时 ' + ((now() - j.t0) / 1000).toFixed(1) + ' 秒', 'ok'); if ($('cClear').checked) txt.value = ''; }
+}
+$('bSend').onclick = sendText;
+$('bAbort').onclick = function () {
+  if (!job) return;
+  job.stop = true;
+  if (!job.cur) endText(); else txtMsg('正在停止：等待当前分段（约 1 秒）完成…（需立即停止请按“急停”）', 'warn');
+};
+txt.addEventListener('keydown', function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendText(); } });
+
+/* ---------- mode tabs and sliders ---------- */
+var mode = store.get('mode', matchMedia('(pointer:coarse)').matches ? 'pad' : 'cap');
+function setMode(m) {
+  mode = m; store.set('mode', m);
+  $('vCap').hidden = m !== 'cap'; $('vPad').hidden = m !== 'pad';
+  $('tCap').setAttribute('aria-selected', m === 'cap'); $('tPad').setAttribute('aria-selected', m === 'pad');
+  if (m !== 'cap' && document.activeElement === cap) cap.blur();
+}
+$('tCap').onclick = function () { setMode('cap'); };
+$('tPad').onclick = function () { setMode('pad'); };
+setMode(mode);
+function slider(id, out, key) {
+  var s = $(id), o = $(out);
+  s.value = prefs[key]; o.textContent = (+prefs[key]).toFixed(2).replace(/0$/, '') + '×';
+  s.oninput = function () { prefs[key] = +s.value; o.textContent = (+s.value).toFixed(2).replace(/0$/, '') + '×'; savePrefs(); };
+}
+slider('sMouse', 'oMouse', 'mouse'); slider('sPad', 'oPad', 'pad'); slider('sWheel', 'oWheel', 'wheel'); slider('sTs', 'oTs', 'ts');
+$('cNat').checked = !!prefs.nat; $('cNat').onchange = function () { prefs.nat = $('cNat').checked; savePrefs(); };
+
+/* ---------- token dialog ---------- */
+function needToken(wrong) {
+  waitingToken = true; clearTimeout(retryTimer); retryTimer = 0;
+  if (ws) dropWs();
+  setConn('auth');
+  if (!$('ovTok').hidden) return;
+  $('ovTok').hidden = false;
+  $('tokErr').textContent = wrong && token ? '已保存的令牌不正确，请重新输入' : '';
+  $('tokIn').value = ''; setTimeout(function () { $('tokIn').focus(); }, 0);
+}
+$('fTok').onsubmit = function (e) {
+  e.preventDefault();
+  var v = $('tokIn').value.trim();
+  if (!v) { $('tokErr').textContent = '请输入令牌'; return; }
+  var old = token; token = v;
+  $('tokErr').textContent = '验证中…';
+  api('GET', '/api/status', undefined, 5000).then(function (j) {
+    store.set('token', v); $('ovTok').hidden = true; $('tokErr').textContent = '';
+    waitingToken = false; banner('auth401'); applyStatus(j); reconnectNow();
+  }, function (er) {
+    token = old;
+    $('tokErr').textContent = er.status === 401 ? '令牌不正确' : er.message;
+    $('tokIn').select();
+  });
+};
+$('ovTok').querySelector('[data-close]').onclick = function () {
+  $('ovTok').hidden = true;
+  banner('auth401', 'bad', '设备需要访问令牌才能控制。', '输入令牌', function () { needToken(false); });
+};
+
+/* ---------- settings ---------- */
+var cfg = null;
+function bytes(s) { return new TextEncoder().encode(s).length; }
+function openSettings(focus) {
+  $('ovSet').hidden = false;
+  var setup = st && st.wifi && !st.wifi.sta_connected;
+  $('setSetup').hidden = !setup; $('fsWifi').className = setup ? 'hl' : '';
+  fillInfo(); cfgMsg('读取设置…');
+  api('GET', '/api/config').then(function (c) {
+    cfg = c; fillCfg(); cfgMsg('');
+    var f = focus === 'tok' ? $('cTok') : focus === 'wifi' ? $('cSsid') : null;
+    if (f) { f.focus(); f.scrollIntoView({ block: 'center' }); }
+  }, function (e) { cfgMsg('读取设置失败：' + e.message, 'err'); });
+}
+function closeSettings() { $('ovSet').hidden = true; $('scanList').textContent = ''; }
+$('bSet').onclick = function () { openSettings(); };
+$('ovSet').querySelector('[data-close]').onclick = closeSettings;
+$('ovSet').addEventListener('click', function (e) { if (e.target === $('ovSet')) closeSettings(); });
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('ovSet').hidden && document.activeElement !== cap) closeSettings(); });
+function cfgMsg(t, cls) { var m = $('cfgMsg'); m.textContent = t; m.className = 'msg ' + (cls || ''); }
+function fillCfg() {
+  $('cSsid').value = cfg.wifi_ssid || '';
+  $('cWpw').value = ''; $('cWpw').placeholder = cfg.wifi_password_set ? '已设置，留空则不修改' : '8–63 个字符';
+  $('cOpen').checked = false; $('cWpw').disabled = false;
+  $('cHost').value = cfg.hostname || ''; hostPrev();
+  $('cApw').value = ''; $('cApw').placeholder = cfg.ap_password_set ? '已设置，留空则不修改' : '8–63 个字符';
+  $('cTok').value = ''; $('cTok').placeholder = cfg.token_set ? '已设置，留空则不修改' : '未设置：任何人都能控制，建议设置';
+  $('cTokClr').checked = false; $('lTokClr').hidden = !cfg.token_set;
+  $('cDelay').value = cfg.key_delay_ms; cfgDelay = cfg.key_delay_ms;
+}
+function hostPrev() { var h = $('cHost').value.trim().toLowerCase(); $('hostPrev').textContent = h ? '访问地址：http://' + h + '.local/' : ''; }
+$('cHost').oninput = hostPrev;
+$('cOpen').onchange = function () { $('cWpw').disabled = $('cOpen').checked; if ($('cOpen').checked) $('cWpw').value = ''; };
+$('cShow').onchange = function () { ['cWpw', 'cApw', 'cTok'].forEach(function (id) { $(id).type = $('cShow').checked ? 'text' : 'password'; }); };
+$('bScan').onclick = function () {
+  var b = $('bScan'), list = $('scanList');
+  b.disabled = true; b.textContent = '扫描中…';
+  api('GET', '/api/wifi/scan', undefined, 20000).then(function (j) {
+    var seen = {}, aps = (j.aps || []).filter(function (a) { if (!a.ssid || seen[a.ssid]) return false; seen[a.ssid] = 1; return true; });
+    aps.sort(function (a, c) { return c.rssi - a.rssi; });
+    list.textContent = '';
+    if (!aps.length) { cfgMsg('没有扫描到网络', 'warn'); return; }
+    aps.forEach(function (a) {
+      var li = document.createElement('li'), n = document.createElement('span'), i = document.createElement('small');
+      n.textContent = a.ssid; i.textContent = (a.secure ? '加密' : '开放') + ' · ' + a.rssi + ' dBm · 信道 ' + a.channel;
+      li.appendChild(n); li.appendChild(i); li.tabIndex = 0;
+      li.onclick = li.onkeydown = function (e) {
+        if (e.type === 'keydown' && e.key !== 'Enter') return;
+        $('cSsid').value = a.ssid; $('cOpen').checked = !a.secure; $('cOpen').onchange();
+        list.textContent = ''; if (a.secure) $('cWpw').focus();
+      };
+      list.appendChild(li);
+    });
+  }, function (e) { cfgMsg('扫描失败：' + e.message, 'err'); })
+    .then(function () { b.disabled = false; b.textContent = '扫描'; });
+};
+$('fCfg').onsubmit = function (e) {
+  e.preventDefault();
+  if (!cfg) { cfgMsg('设置尚未读取', 'err'); return; }
+  var b = {}, errs = [], v;
+  var ssid = $('cSsid').value;
+  if (ssid !== (cfg.wifi_ssid || '')) { if (bytes(ssid) > 32) errs.push('网络名称最长 32 字节'); b.wifi_ssid = ssid; }
+  var wpw = $('cWpw').value;
+  if ($('cOpen').checked) b.wifi_password = '';
+  else if (wpw) { v = bytes(wpw); if (v < 8 || v > 63) errs.push('WiFi 密码需为 8–63 个字符'); b.wifi_password = wpw; }
+  if (b.wifi_ssid && !('wifi_password' in b)) errs.push('更换网络时请输入该网络的密码（开放网络请勾选“开放网络”）');
+  var host = $('cHost').value.trim().toLowerCase();
+  if (host !== cfg.hostname) { if (!/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(host)) errs.push('主机名需为 1–32 位小写字母、数字或“-”，且不能以“-”开头或结尾'); b.hostname = host; }
+  var apw = $('cApw').value;
+  if (apw) { v = bytes(apw); if (v < 8 || v > 63) errs.push('热点密码需为 8–63 个字符'); b.ap_password = apw; }
+  var tok = $('cTok').value;
+  if ($('cTokClr').checked) b.token = '';
+  else if (tok) { if (!/^[\x21-\x7e]{1,64}$/.test(tok)) errs.push('访问令牌需为 1–64 位可打印 ASCII 字符，不能有空格'); b.token = tok; }
+  var dl = $('cDelay').value.trim();
+  if (dl !== String(cfg.key_delay_ms)) { v = Number(dl); if (dl === '' || !(v >= 0 && v <= 1000 && Math.floor(v) === v)) errs.push('按键间隔需为 0–1000 之间的整数'); b.key_delay_ms = v; }
+  if (errs.length) { cfgMsg(errs.join('；'), 'err'); return; }
+  if (!Object.keys(b).length) { cfgMsg('没有修改', 'warn'); return; }
+  $('bSave').disabled = true; cfgMsg('保存中…');
+  api('POST', '/api/config', b).then(function (r) {
+    if ('token' in b) { token = b.token; store.set('token', token); }
+    if (r.reboot_required) {
+      cfgMsg('已保存，部分设置需重启设备后生效', 'ok');
+      banner('reboot', 'warn', '设置已保存，需重启设备后生效。', '立即重启', reboot);
+      $('bRb2').hidden = false;
+    } else cfgMsg('已保存', 'ok');
+    note('设备设置已保存', 'ok');
+    return api('GET', '/api/config').then(function (c) { cfg = c; fillCfg(); });
+  }).catch(function (er) { cfgMsg('保存失败：' + er.message, 'err'); })
+    .then(function () { $('bSave').disabled = false; });
+};
+function reboot() {
+  if (!confirm('确定要重启设备吗？正在执行的任务会中断。')) return;
+  api('POST', '/api/reboot').then(function () {
+    rebootAt = now(); banner('reboot'); $('bRb2').hidden = true;
+    var h = cfg && cfg.hostname;
+    banner('reboot2', 'info', '设备正在重启，稍后自动重新连接…' + (h ? '如果修改了 WiFi 或主机名，设备地址可能改变，可尝试 http://' + h + '.local/' : ''));
+    closeSettings();
+  }, function (e) { note('重启失败：' + e.message, 'error'); });
+}
+$('bReboot').onclick = $('bRb2').onclick = reboot;
+$('bForget').onclick = function () { token = ''; store.set('token', ''); note('已清除本机保存的令牌', 'ok'); };
+function fmtDur(ms) { var s = Math.floor(ms / 1000), d = Math.floor(s / 86400); s %= 86400; return (d ? d + ' 天 ' : '') + Math.floor(s / 3600) + ' 时 ' + Math.floor(s % 3600 / 60) + ' 分'; }
+function fillInfo() {
+  var dl = $('info'); dl.textContent = '';
+  if (!st) { dl.textContent = '暂无数据'; return; }
+  var d = st.device || {}, w = st.wifi || {}, u = st.usb || {}, h = st.hid || {};
+  [['固件版本', (d.version || '?') + '（接口 ' + d.api + '）'], ['运行时间', fmtDur(d.uptime_ms || 0)], ['重启原因', d.reset_reason],
+   ['内存', Math.round((d.heap_free || 0) / 1024) + ' KB 空闲，最低 ' + Math.round((d.heap_min || 0) / 1024) + ' KB'],
+   ['WiFi', w.sta_connected ? (w.ssid + ' · ' + w.ip + ' · ' + w.rssi + ' dBm') : '未连接'],
+   ['热点', w.ap_active ? (w.ap_ssid + ' · ' + w.ap_ip) : '关闭'], ['主机名', (w.hostname || '') + '.local'],
+   ['USB', (u.mounted ? '已连接' : '未连接') + (u.suspended ? '，已挂起' : '') + ' · 键盘 ' + u.kbd_protocol + ' / 鼠标 ' + u.mouse_protocol + ' · 远程唤醒' + (u.remote_wakeup ? '允许' : '不允许')],
+   ['任务', '完成 ' + h.jobs_done + '，失败 ' + h.jobs_failed + '，报告 ' + h.reports_sent], ['客户端', st.ws_clients + ' 个'],
+   ['鉴权', st.auth_required ? '已启用访问令牌' : '未启用（不安全）']
+  ].forEach(function (r) { var t = document.createElement('dt'), v = document.createElement('dd'); t.textContent = r[0]; v.textContent = r[1] == null ? '' : r[1]; dl.appendChild(t); dl.appendChild(v); });
+}
+
+/* ---------- never leave a key stuck ---------- */
+window.addEventListener('blur', releaseAll);
+window.addEventListener('pagehide', releaseAll);
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) releaseAll();
+  else if (!ws && !waitingToken) reconnectNow();
+});
+window.addEventListener('pageshow', function (e) { if (e.persisted && !ws && !waitingToken) reconnectNow(); });
+
+heldChanged(); capUI(); textUI();
+connect();
+})();
+</script>
+</body>
+</html>
