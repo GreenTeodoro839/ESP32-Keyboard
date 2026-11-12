@@ -1,8 +1,10 @@
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "hid_engine.h"
@@ -18,6 +20,22 @@ static const char *TAG = "ws";
 #define STATUS_PERIOD_US   (2000 * 1000LL)
 #define STATUS_MIN_GAP_US  (50 * 1000LL)
 #define ERROR_GAP_US       (1000 * 1000LL)
+
+/* After the WebSocket close handshake esp_http_server closes the TCP socket
+ * at once, which makes the device the active closer: the 4-tuple then stays in
+ * TIME_WAIT for 2*TCP_MSL. A client that is already fully closed can reuse its
+ * source port immediately, so a new SYN may hit our TIME_WAIT entry and get a
+ * challenge ACK instead of SYN-ACK (docs/known-issues.md). Let the client
+ * close first and our close becomes a passive one (CLOSE_WAIT -> LAST_ACK),
+ * leaving no TIME_WAIT on the device.
+ *
+ * The wait runs in a dedicated reaper task, not in the HTTP server task: some
+ * clients take ~1 s to close their socket after the close echo (websocket-client
+ * with a reader thread does), and the HTTP task must keep serving other
+ * connections meanwhile. The reaper holds one spare socket per closed WS. */
+#define PEER_CLOSE_WAIT_US    (2000 * 1000LL)
+#define PEER_CLOSE_DRAIN_MAX  16384
+#define REAP_QUEUE_LEN        8
 
 typedef struct outmsg {
     struct outmsg *next;
@@ -45,6 +63,8 @@ static client_t s_c[ESPKB_WS_MAX_CLIENTS];
 static SemaphoreHandle_t s_mx;
 static httpd_handle_t s_hd;
 static TaskHandle_t s_push_task;
+static TaskHandle_t s_reap_task;
+static QueueHandle_t s_reap_q;
 static volatile bool s_status_dirty;
 static volatile int s_flush_pending;
 static uint32_t s_gen_counter;
@@ -468,15 +488,47 @@ static esp_err_t ws_post_handshake(httpd_req_t *req)
     return ESP_OK;
 }
 
-void ws_on_close(int fd)
+/* Waits until the client has closed its side (recv returns 0) or the deadline
+ * expires, draining anything the client sent after its CLOSE frame (some
+ * clients repeat the CLOSE frame). Returns immediately for RST/error. */
+static void wait_peer_fin(int fd)
+{
+    char buf[64];
+    size_t drained = 0;
+    int64_t deadline = now_us() + PEER_CLOSE_WAIT_US;
+    for (;;) {
+        int n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n == 0) {
+            return; /* client FIN: the caller's close will be passive */
+        }
+        if (n > 0) {
+            drained += (size_t)n;
+            if (drained >= PEER_CLOSE_DRAIN_MAX) {
+                return;
+            }
+            continue;
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            return;
+        }
+        if (now_us() >= deadline) {
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+bool ws_on_close(int fd)
 {
     uint32_t owner = 0;
+    bool was_ws = false;
     if (!s_mx) {
-        return;
+        return false;
     }
     lock();
     for (int i = 0; i < ESPKB_WS_MAX_CLIENTS; i++) {
         if (s_c[i].fd == fd) {
+            was_ws = true;
             owner = s_c[i].owner;
             free_outbox(&s_c[i]);
             s_c[i].fd = -1;
@@ -486,10 +538,32 @@ void ws_on_close(int fd)
         }
     }
     unlock();
+    if (!was_ws) {
+        return false;
+    }
     if (owner) {
         ESP_LOGI(TAG, "client disconnected (fd %d)", fd);
         engine_owner_close(owner); /* releases everything it held */
         espkb_status_changed();
+    }
+    /* The reaper closes the fd after the client's FIN; the HTTP server task
+     * must not block here. If the queue is full, close immediately. */
+    if (s_reap_q && xQueueSend(s_reap_q, &fd, 0) == pdTRUE) {
+        return true;
+    }
+    return false;
+}
+
+static void reaper_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        int fd = -1;
+        if (xQueueReceive(s_reap_q, &fd, portMAX_DELAY) != pdTRUE || fd < 0) {
+            continue;
+        }
+        wait_peer_fin(fd);
+        close(fd);
     }
 }
 
@@ -554,6 +628,11 @@ void ws_init(httpd_handle_t hd)
         s_c[i].fd = -1;
     }
     BaseType_t ok = xTaskCreate(push_task, "ws_push", 4096, NULL, 5, &s_push_task);
+    configASSERT(ok == pdPASS);
+    (void)ok;
+    s_reap_q = xQueueCreate(REAP_QUEUE_LEN, sizeof(int));
+    configASSERT(s_reap_q);
+    ok = xTaskCreate(reaper_task, "ws_reap", 3072, NULL, 4, &s_reap_task);
     configASSERT(ok == pdPASS);
     (void)ok;
 }

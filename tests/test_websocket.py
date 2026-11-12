@@ -239,6 +239,50 @@ def test_binary_frame_not_executed(hid, ws):
         assert ws.ping("after-binary") is not None, "connection unusable after a binary frame but not closed"
 
 
+def test_close_lets_client_close_tcp_first(device_host, dev):
+    """The device must not be the active TCP closer after a WebSocket close.
+
+    If it is, the 4-tuple stays in TIME_WAIT for 2*TCP_MSL on the device while
+    the client is already fully closed and free to reuse its source port; a
+    new SYN then gets a challenge ACK instead of SYN-ACK (docs/known-issues.md).
+    """
+    import select
+    import socket
+
+    import websocket
+
+    url = support.ws_url(device_host, token=(dev.token or None))
+    ws = websocket.create_connection(url, timeout=5.0)
+    try:
+        # The device pushes a status frame right after the handshake.
+        while True:
+            opcode, _ = ws.recv_data(control_frame=True)
+            if opcode == websocket.ABNF.OPCODE_TEXT:
+                break
+        ws.send_close(status=1000)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            opcode, _ = ws.recv_data(control_frame=True)
+            if opcode == websocket.ABNF.OPCODE_CLOSE:
+                break
+        else:
+            raise AssertionError("device did not echo the WebSocket close frame")
+
+        sock = ws.sock
+        readable, _, _ = select.select([sock], [], [], 0.2)
+        assert not readable, (
+            "device sent FIN before the client closed the TCP connection; that puts the "
+            "4-tuple in TIME_WAIT on the device and can stall a reused client port")
+        sock.shutdown(socket.SHUT_WR)  # client FIN, keep the read side open
+        sock.settimeout(2.0)
+        assert sock.recv(1) == b"", "device did not close after the client's FIN"
+    finally:
+        try:
+            ws.shutdown()
+        except Exception:
+            pass
+
+
 def test_connection_limit_4(dev, ws_factory):
     support.wait_status(dev, lambda s: s["ws_clients"] == 0, timeout=3)
     conns = [ws_factory() for _ in range(4)]

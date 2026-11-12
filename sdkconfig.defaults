@@ -57,7 +57,14 @@ CONFIG_HTTPD_ENABLE_EVENTS=n
 CONFIG_HTTPD_PURGE_BUF_LEN=256
 
 # ---------- lwIP: room for many short-lived clients ----------
-CONFIG_LWIP_MAX_SOCKETS=32
+# TIME_WAIT lasts 2*TCP_MSL. The WebSocket close path now waits for the
+# client's FIN first (src/ws.c), but any remaining device-initiated close
+# should not block a reused client port for the default 120 s. 5 s is ample
+# for a LAN, where delayed duplicates live for milliseconds.
+CONFIG_LWIP_TCP_MSL=5000
+# 4 extra sockets let the WebSocket reaper wait for a client FIN without
+# stealing a connection slot from the HTTP server (28 + 3 internal + 4 + 1 spare).
+CONFIG_LWIP_MAX_SOCKETS=36
 CONFIG_LWIP_MAX_ACTIVE_TCP=40
 CONFIG_LWIP_MAX_LISTENING_TCP=4
 CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE=16

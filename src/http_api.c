@@ -490,8 +490,9 @@ static esp_err_t on_open(httpd_handle_t hd, int fd)
 static void on_close(httpd_handle_t hd, int fd)
 {
     (void)hd;
-    ws_on_close(fd);
-    close(fd);
+    if (!ws_on_close(fd)) {
+        close(fd);
+    }
 }
 
 void http_api_start(void)
@@ -500,7 +501,7 @@ void http_api_start(void)
     cfg.server_port = 80;
     cfg.stack_size = 8192;
     cfg.task_priority = 6;
-    cfg.max_open_sockets = 28;     /* LWIP_MAX_SOCKETS (32) - 3 internal - 1 spare */
+    cfg.max_open_sockets = 28;     /* LWIP_MAX_SOCKETS (36) - 3 internal - 4 WS reaper - 1 spare */
     cfg.max_uri_handlers = 24;
     cfg.max_resp_headers = 8;
     cfg.backlog_conn = 12;

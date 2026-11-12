@@ -41,9 +41,9 @@ device running that image. These tests never make the device emit keys, so they 
 USB port on this machine and skip the clean-state fixture; they restore what they change (`key_delay_ms`,
 the token) themselves.
 
-A rare connection timeout after sustained short-connection churn is a known device-side TIME_WAIT
-issue, not a test bug: rerun the affected test. Details and candidate fixes are in
-[`../docs/known-issues.md`](../docs/known-issues.md).
+The suite assumes the device is dedicated to the test run: close any browser tab or other client
+connected to its web page first. A real `/ws` client changes `ws_clients` and occupies one of the four
+WebSocket slots, which makes the connection-count tests fail.
 
 ## Safety model
 
