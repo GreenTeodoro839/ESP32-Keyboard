@@ -2,7 +2,8 @@
 """espkb.py - client library and command-line tool for ESPKB (HTTP API v1).
 
 ESPKB is an ESP32-S3 that receives commands over WiFi and acts as a USB
-keyboard + relative mouse on the computer its USB port is plugged into.
+keyboard + mouse (relative and absolute) on the computer its USB port is
+plugged into.
 This single file has no third-party dependencies (Python 3.8+); copy it
 anywhere.
 
@@ -13,6 +14,7 @@ Library::
     kb.type("echo hello\\n")
     kb.key("ctrl+alt+t")
     kb.move(120, -40); kb.click("left")
+    kb.move_to(960, 540, screen=(1920, 1080))    # absolute: pixel (960, 540)
     kb.seq([{"key": "gui+r"}, {"delay": 400}, {"text": "notepad\\n"}])
     try:
         kb.key("nosuchkey")
@@ -28,13 +30,14 @@ import json
 import math
 import os
 import socket
+import struct
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "1.0"
+__version__ = "1.1"
 API_VERSION = 1
 DEFAULT_HOST = "espkb.local"
 MAX_BODY = 65536
@@ -57,7 +60,7 @@ class ESPKBError(Exception):
       status  HTTP status (None when the device could not be reached)
       code    the device's error code ("bad_step", "busy", "timeout", ...) or a
               client-side code: "unreachable", "client_timeout", "bad_response",
-              "not_ready"
+              "not_ready", "ota_failed"
       message human readable explanation
       body    the full JSON error object (dict), if any
       index   step index for bad_step errors (or None)
@@ -115,6 +118,8 @@ def estimate_ms(steps, key_delay_ms=10):
                 step = s.get("step", 127) if isinstance(s.get("step", 127), int) and s.get("step", 127) > 0 else 127
                 n = math.ceil(max(abs(int(mv[0])), abs(int(mv[1]))) / step)
                 total += n * (s.get("delay_ms", 0) + per_report)
+            elif "move_to" in s:
+                total += 2 * per_report
             elif "click" in s:
                 total += s.get("count", 1) * (s.get("hold_ms", 20) + s.get("interval_ms", 60) + 2 * per_report)
             elif "scroll" in s:
@@ -126,6 +131,28 @@ def estimate_ms(steps, key_delay_ms=10):
         except (TypeError, ValueError, IndexError, KeyError):
             continue
     return int(total)
+
+
+IMAGE_HEAD_SIZE = 288   # image header (24) + segment header (8) + application descriptor (256)
+
+
+def parse_image(data):
+    """Describe a firmware image (the build's firmware.bin) from its first 288 bytes.
+
+    Returns {"project", "version", "date", "time", "idf", "sha256", "chip_id"};
+    sha256 is the first 16 hex digits of the app's ELF SHA-256, the same value
+    the device reports as device.sha256 while it runs this image.
+    Raises ValueError if data is not an ESP application image.
+    """
+    data = bytes(data[:IMAGE_HEAD_SIZE])
+    if len(data) < IMAGE_HEAD_SIZE or data[0] != 0xE9 or struct.unpack_from("<I", data, 32)[0] != 0xABCD5432:
+        raise ValueError("not an ESP application image (expected the build's firmware.bin)")
+
+    def text(off, n):
+        return data[off:off + n].split(b"\0", 1)[0].decode("utf-8", "replace")
+
+    return {"project": text(80, 32), "version": text(48, 32), "date": text(128, 16), "time": text(112, 16),
+            "idf": text(144, 32), "sha256": data[176:184].hex(), "chip_id": struct.unpack_from("<H", data, 12)[0]}
 
 
 def _base_url(host):
@@ -358,6 +385,15 @@ class ESPKB:
             body["delay_ms"] = delay_ms
         return self._action("/api/mouse", body, wait, timeout)
 
+    def move_to(self, x, y, screen=None, wait=True, timeout=None):
+        """Absolute mouse position.  Without screen: x, y in 0..32767 span the whole
+        screen (0 = left/top, 32767 = right/bottom).  With screen=(width, height):
+        x, y are pixels, 0..width-1 and 0..height-1."""
+        body = {"move_to": [int(x), int(y)]}
+        if screen is not None:
+            body["screen"] = [int(screen[0]), int(screen[1])]
+        return self._action("/api/mouse", body, wait, timeout)
+
     def click(self, button="left", count=None, hold_ms=None, interval_ms=None, wait=True, timeout=None):
         body = {"click": button}
         for k, v in (("count", count), ("hold_ms", hold_ms), ("interval_ms", interval_ms)):
@@ -399,6 +435,71 @@ class ESPKB:
     def reboot(self):
         return self.post("/api/reboot")
 
+    # -- firmware update -----------------------------------------------------
+    def ota_info(self):
+        """GET /api/ota: {"running": {...}, "next": {"partition","size"} or None, "update": {...}}."""
+        return self.get("/api/ota")
+
+    def ota(self, image, reboot=True, timeout=None):
+        """Upload a firmware image (bytes, or the path of firmware.bin) with POST /api/ota.
+
+        The device writes it to the inactive slot, verifies it and (reboot=True)
+        restarts into it about a second after answering
+        {"ok":true,"bytes":..,"partition":..,"version":..,"reboot":..}.
+        Settings (WiFi, token, ...) are kept.  With reboot=False the image
+        starts at the next reboot.  See ota_and_wait() to also check the result.
+        """
+        if not isinstance(image, (bytes, bytearray)):
+            with open(image, "rb") as f:
+                image = f.read()
+        # Ask first: a request the device refuses (token, size, update already running) is cut off
+        # in mid-upload, and the reason would be lost in a connection error.
+        info = self.ota_info()
+        nxt = info.get("next") or {}
+        if not nxt:
+            raise ESPKBError("the device has no update slot: flash this firmware once over UART", None, "ota_failed")
+        if len(image) > nxt.get("size", 0):
+            raise ESPKBError("image of %d bytes does not fit the %s byte firmware slot" % (len(image), nxt.get("size")),
+                             413, "too_large")
+        if (info.get("update") or {}).get("state") in ("receiving", "verifying"):
+            raise ESPKBError("another firmware update is in progress", 503, "busy")
+        if timeout is None:
+            timeout = max(self.timeout, 60.0) + len(image) / 20000.0
+        return self.request("POST", "/api/ota", bytes(image), params=None if reboot else {"reboot": "0"},
+                            timeout=timeout, content_type="application/octet-stream")
+
+    def ota_and_wait(self, image, timeout=90.0):
+        """Upload a firmware image, let the device reboot and wait until it is back.
+
+        Returns the status of the device running the new image.  Raises
+        ESPKBError with code "ota_failed" if it came back running something
+        else (a new image that cannot start is rolled back by the device), or
+        "not_ready" if it did not come back within timeout seconds.
+        """
+        if not isinstance(image, (bytes, bytearray)):
+            with open(image, "rb") as f:
+                image = f.read()
+        want = parse_image(image)["sha256"]
+        before = self.status().get("device", {}).get("uptime_ms")
+        self.ota(image, reboot=True)
+        t_done = time.monotonic()
+        time.sleep(1.5)
+        deadline = t_done + timeout
+        while True:
+            st = self.wait_ready(timeout=max(1.0, deadline - time.monotonic()), require_usb=False)
+            dev = st.get("device", {})
+            up = dev.get("uptime_ms")
+            # rebooted: the uptime is less than it would be had the device kept running
+            if before is None or up is None or up < before + (time.monotonic() - t_done) * 1000:
+                if dev.get("sha256") != want:
+                    raise ESPKBError("the device restarted but runs %s (%s), not the uploaded image (%s): "
+                                     "the new firmware was probably rolled back"
+                                     % (dev.get("version"), dev.get("sha256"), want), None, "ota_failed")
+                return st
+            if time.monotonic() > deadline:
+                raise ESPKBError("device did not reboot after the update", None, "not_ready")
+            time.sleep(0.5)
+
     # -- helpers -----------------------------------------------------------
     def wait_ready(self, timeout=30.0, require_usb=True, interval=0.5):
         """Block until /api/status answers (and usb.mounted is true, unless
@@ -433,8 +534,9 @@ class ESPKB:
                 raise ESPKBError("device still busy after %.0f s" % timeout, None, "not_ready")
             time.sleep(interval)
 
-    def reboot_and_wait(self, timeout=60.0):
-        """Reboot and wait until the device is back (uptime restarted)."""
+    def reboot_and_wait(self, timeout=60.0, require_usb=True):
+        """Reboot and wait until the device is back (uptime restarted) and, unless
+        require_usb=False, mounted by the USB host again."""
         try:
             before = self.status().get("device", {}).get("uptime_ms")
         except ESPKBError:
@@ -443,7 +545,7 @@ class ESPKB:
         time.sleep(1.5)
         deadline = time.monotonic() + timeout
         while True:
-            st = self.wait_ready(timeout=max(1.0, deadline - time.monotonic()))
+            st = self.wait_ready(timeout=max(1.0, deadline - time.monotonic()), require_usb=require_usb)
             up = st.get("device", {}).get("uptime_ms")
             if before is None or up is None or up < before:
                 return st
@@ -463,6 +565,8 @@ Step reference (one JSON object per step, exactly one verb each):
   {"key":"ctrl+alt+del"}             tap key/combo; optional hold_ms, repeat (1-1000), delay_ms
   {"key":"shift","action":"down"}    hold ("down") / release ("up"); optional ttl_ms (1-600000)
   {"move":[dx,dy]}                   relative move, +-32767; optional step (1-127), delay_ms
+  {"move_to":[x,y]}                  absolute position, 0..32767 = left/top..right/bottom of the screen;
+                                     with "screen":[w,h] x,y are pixels (0..w-1, 0..h-1)
   {"click":"left"}                   click; optional count (1-100), hold_ms (20), interval_ms (60)
   {"button":"left","action":"down"}  hold/release a mouse button (action required)
   {"scroll":3} / {"scroll":[v,h]}    v>0 up, v<0 down, h>0 right; +-32767
@@ -484,11 +588,14 @@ examples:
   espkb.py key down --repeat 5               (arrow down five times)
   espkb.py down shift ; espkb.py up shift
   espkb.py move 120 -40 ; espkb.py click ; espkb.py click right --count 2
+  espkb.py moveto 960 540 --screen 1920x1080 (absolute: pixel 960,540 of a 1920x1080 screen)
+  espkb.py moveto 16384 16384                (absolute, 0..32767 per axis: the screen centre)
   espkb.py scroll -5                         (scroll down)
   espkb.py seq '[{"key":"gui+r"},{"delay":400},{"text":"notepad\\n"}]'
   espkb.py seq steps.json                    (file, or - for stdin)
   espkb.py release                           (emergency stop: abort jobs, release all keys)
   espkb.py config set key_delay_ms=10 ; espkb.py config get
+  espkb.py ota .pio/build/esp32-s3-devkitc-1/firmware.bin    (update the firmware; settings are kept)
   espkb.py --json status                     (raw JSON output)
 
 device address: --host or $ESPKB_HOST (default espkb.local); token: --token or $ESPKB_TOKEN.
@@ -497,7 +604,8 @@ Action commands wait until the device has executed the job (synchronous); --asyn
 
 exit codes:
   0 success
-  1 the device returned an error (code and message on stderr, e.g. "bad_step (HTTP 400): ...")
+  1 the device returned an error (code and message on stderr, e.g. "bad_step (HTTP 400): ..."),
+    or it does not run the uploaded firmware after "ota"
   2 usage error (bad arguments)
   3 the device could not be reached or did not answer in time
   4 wait-ready / reboot --wait timed out
@@ -666,6 +774,11 @@ def build_parser():
     p.add_argument("dy", type=int)
     p.add_argument("--step", type=int, help="max movement per report, 1-127 (default 127)")
     p.add_argument("--delay-ms", type=int, help="ms between reports (default 0)")
+    p = add("moveto", "move the mouse to an absolute position (0..32767 per axis, or pixels with --screen)")
+    p.add_argument("x", type=int)
+    p.add_argument("y", type=int)
+    p.add_argument("--screen", type=_screen_arg, metavar="WxH",
+                   help="screen size in pixels, e.g. 1920x1080: X and Y are then pixel coordinates")
     p = add("click", "click a mouse button (default left)")
     p.add_argument("button", nargs="?", default="left", choices=BUTTONS)
     p.add_argument("--count", type=int, help="number of clicks, 1-100 (2 = double click)")
@@ -693,6 +806,14 @@ def build_parser():
     add("wifi-scan", "scan for WiFi networks (takes a few seconds)")
     p = add("reboot", "reboot the device")
     p.add_argument("--wait", action="store_true", help="wait until it is back (uses --timeout, default 60)")
+    p = add("ota", "update the firmware over WiFi (settings are kept), or show the firmware state",
+            epilog="FILE is the application image of a build: .pio/build/esp32-s3-devkitc-1/firmware.bin.\n"
+                   "The device verifies the image, reboots into it and returns to the old firmware on its\n"
+                   "own if the new one cannot start.  Without FILE: show what runs and the update slot.")
+    p.add_argument("file", nargs="?", metavar="FILE", help="firmware.bin to upload")
+    p.add_argument("--no-reboot", action="store_true", help="only store the image; it starts at the next reboot")
+    p.add_argument("--no-wait", action="store_true",
+                   help="do not wait for the device to come back and check which firmware it runs")
     p = add("wait-ready", "wait until the device answers and the USB host has mounted it")
     p.add_argument("--no-usb", action="store_true", help="only wait for the device to answer")
     return ap
@@ -752,6 +873,9 @@ def run(args, kb):
         _emit(args, res, _format_action(res))
     elif cmd == "move":
         res = kb.move(args.dx, args.dy, args.step, args.delay_ms, wait=wait, timeout=tmo)
+        _emit(args, res, _format_action(res))
+    elif cmd == "moveto":
+        res = kb.move_to(args.x, args.y, args.screen, wait=wait, timeout=tmo)
         _emit(args, res, _format_action(res))
     elif cmd == "click":
         res = kb.click(args.button, args.count, args.hold_ms, args.interval_ms, wait=wait, timeout=tmo)
@@ -822,12 +946,56 @@ def run(args, kb):
         else:
             res = kb.reboot()
             _emit(args, res, "rebooting")
+    elif cmd == "ota":
+        if not args.file:
+            if args.no_reboot or args.no_wait:
+                raise UsageError("ota: --no-reboot/--no-wait need a FILE")
+            res = kb.ota_info()
+            run, nxt, up = res.get("running") or {}, res.get("next"), res.get("update") or {}
+            lines = ["running: %s, built %s, id %s, slot %s, %s" % (
+                         run.get("version"), run.get("build"), run.get("sha256"), run.get("partition"), run.get("state")),
+                     "update slot: " + ("%s (%s bytes)" % (nxt.get("partition"), nxt.get("size")) if nxt
+                                        else "none - flash the firmware once over UART to enable updates"),
+                     "last update: %s%s" % (up.get("state"), (", %s of %s bytes" % (up.get("received"), up.get("total"))
+                                                            if up.get("state") not in (None, "idle") else "")
+                                            + (": " + up["message"] if up.get("message") else ""))]
+            _emit(args, res, "\n".join(lines))
+            return EXIT_OK
+        with open(args.file, "rb") as f:
+            image = f.read()
+        try:
+            head = parse_image(image)
+        except ValueError as e:
+            raise UsageError("ota: %s: %s" % (args.file, e))
+        if not getattr(args, "json", False):
+            print("uploading %s %s (built %s %s, %d bytes) ..." % (head["project"], head["version"], head["date"],
+                                                                 head["time"], len(image)), flush=True)
+        if args.no_reboot or args.no_wait:
+            res = kb.ota(image, reboot=not args.no_reboot, timeout=tmo)
+            _emit(args, res, "written to %s and verified; %s" % (
+                res.get("partition"), "the device is rebooting into it" if res.get("reboot")
+                else "it starts at the next reboot (espkb.py reboot)"))
+        else:
+            st = kb.ota_and_wait(image, timeout=tmo or 90.0)
+            d = st.get("device", {})
+            _emit(args, st, "updated: the device runs %s (id %s, slot %s)" % (d.get("version"), d.get("sha256"),
+                                                                             d.get("partition")))
     elif cmd == "wait-ready":
         st = kb.wait_ready(timeout=tmo or 30.0, require_usb=not args.no_usb)
         _emit(args, st, "ready: " + format_status(st).splitlines()[1].split(":", 1)[1].strip())
     else:  # pragma: no cover
         raise UsageError("unknown command %s" % cmd)
     return EXIT_OK
+
+
+def _screen_arg(s):
+    w, sep, h = s.lower().partition("x")
+    try:
+        if sep and int(w) > 0 and int(h) > 0:
+            return (int(w), int(h))
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("screen size must be WIDTHxHEIGHT, e.g. 1920x1080")
 
 
 def _key_arg(s):
@@ -863,6 +1031,8 @@ def main(argv=None):
         sys.stderr.write("espkb: error: %s\n" % e)
         if e.code == "not_ready":
             return EXIT_NOT_READY
+        if e.code == "ota_failed":
+            return EXIT_DEVICE_ERROR
         if isinstance(e, ESPKBConnectionError) or e.status is None:
             return EXIT_UNREACHABLE
         return EXIT_DEVICE_ERROR

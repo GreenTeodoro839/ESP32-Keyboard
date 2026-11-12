@@ -4,13 +4,13 @@
 The ESPKB HID port is plugged into a development machine that runs a live
 desktop session.  A udev rule unbinds the kernel ``usbhid`` driver from
 303a:4004, so the device's reports reach nothing unless a program reads them
-over libusb.  This module is that program: it claims both HID interfaces,
-keeps the interrupt IN endpoints polled, and records every report with a
+over libusb.  This module is that program: it claims all three HID interfaces
+(keyboard, mouse, absolute mouse), keeps the interrupt IN endpoints polled, and records every report with a
 monotonic timestamp so tests can check, report by report, what the device
 emitted.
 
-Safety rule (central): before any HID output may be produced, both HID
-interfaces must be bound to nothing or to ``usbfs`` (i.e. claimed by us),
+Safety rule (central): before any HID output may be produced, every HID
+interface must be bound to nothing or to ``usbfs`` (i.e. claimed by us),
 never to ``usbhid``.  :class:`HIDHost` refuses to start otherwise, detaches a
 kernel driver via libusb if one is somehow active, and NEVER re-attaches the
 kernel driver.
@@ -52,14 +52,19 @@ DEFAULT_VID = 0x303A
 DEFAULT_PID = 0x4004
 KBD_INTF = 0
 MOUSE_INTF = 1
+ABS_INTF = 2          # absolute mouse (position only; no boot protocol)
+HID_INTFS = (KBD_INTF, MOUSE_INTF, ABS_INTF)
 KBD_EP = 0x81
 MOUSE_EP = 0x82
-EP_ADDR = {"kbd": KBD_EP, "mouse": MOUSE_EP}
-EP_INTF = {"kbd": KBD_INTF, "mouse": MOUSE_INTF}
-INTF_EP = {KBD_INTF: "kbd", MOUSE_INTF: "mouse"}
+ABS_EP = 0x83
+EP_ADDR = {"kbd": KBD_EP, "mouse": MOUSE_EP, "abs": ABS_EP}
+EP_INTF = {"kbd": KBD_INTF, "mouse": MOUSE_INTF, "abs": ABS_INTF}
+INTF_EP = {KBD_INTF: "kbd", MOUSE_INTF: "mouse", ABS_INTF: "abs"}
 KBD_REPORT_LEN = 8
 MOUSE_REPORT_LEN = 5
 MOUSE_BOOT_REPORT_LEN = 3
+ABS_REPORT_LEN = 7    # buttons, X u16 LE, Y u16 LE, wheel, pan
+ABS_MAX = 32767       # logical range of the absolute axes: 0..ABS_MAX
 
 LED_NUM = 0x01
 LED_CAPS = 0x02
@@ -310,6 +315,16 @@ class MouseReport:
     raw: bytes
 
 
+@dataclass(frozen=True)
+class AbsReport:
+    buttons: int
+    x: int
+    y: int
+    wheel: int
+    pan: int
+    raw: bytes
+
+
 def parse_kbd(data: bytes) -> KbdReport:
     data = bytes(data)
     if len(data) != KBD_REPORT_LEN:
@@ -324,6 +339,36 @@ def parse_mouse(data: bytes) -> MouseReport:
     b = list(data) + [0, 0]
     return MouseReport(b[0], _int8(b[1]), _int8(b[2]), _int8(b[3]) if len(data) > 3 else 0,
                        _int8(b[4]) if len(data) > 4 else 0, len(data), data)
+
+
+def parse_abs(data: bytes) -> AbsReport:
+    data = bytes(data)
+    if len(data) != ABS_REPORT_LEN:
+        raise ValueError("absolute mouse report must be %d bytes, got %d: %s"
+                         % (ABS_REPORT_LEN, len(data), data.hex(" ")))
+    return AbsReport(data[0], data[1] | (data[2] << 8), data[3] | (data[4] << 8), _int8(data[5]),
+                     _int8(data[6]), data)
+
+
+def abs_bytes(x: int, y: int, buttons: int = 0, wheel: int = 0, pan: int = 0) -> bytes:
+    if not (0 <= x <= ABS_MAX and 0 <= y <= ABS_MAX):
+        raise ValueError("absolute position (%d, %d) outside 0..%d" % (x, y, ABS_MAX))
+    return bytes([buttons & 0xFF, x & 0xFF, x >> 8, y & 0xFF, y >> 8, _u8(wheel), _u8(pan)])
+
+
+def pixel_to_abs(p: int, n: int) -> int:
+    """Absolute axis value for pixel p of n (API.md move_to with "screen"): the value
+    nearest to the pixel's centre among those a host maps to that pixel
+    (pixel = floor(v * n / 32768))."""
+    span = ABS_MAX + 1
+    centre = (2 * p + 1) * span // (2 * n)
+    first = -(-p * span // n)
+    return max(centre, first)
+
+
+def abs_to_pixel(v: int, n: int) -> int:
+    """The pixel a host (libinput) shows for absolute value v on an n-pixel axis."""
+    return v * n // (ABS_MAX + 1)
 
 
 def kbd_bytes(mods: int = 0, keys: Sequence[int] = ()) -> bytes:
@@ -384,8 +429,21 @@ def describe_mouse(data: bytes) -> str:
     return s
 
 
+def describe_abs(data: bytes) -> str:
+    try:
+        r = parse_abs(data)
+    except ValueError as e:
+        return "INVALID(%s)" % e
+    s = "abs x=%d y=%d" % (r.x, r.y)
+    if r.buttons or r.wheel or r.pan:
+        s += " btn=0x%02x wheel=%+d pan=%+d" % (r.buttons, r.wheel, r.pan)
+    return s
+
+
 def describe(ep: str, data: bytes) -> str:
-    return describe_kbd(data) if ep == "kbd" else describe_mouse(data)
+    if ep == "kbd":
+        return describe_kbd(data)
+    return describe_abs(data) if ep == "abs" else describe_mouse(data)
 
 
 # ---------------------------------------------------------------------------
@@ -393,9 +451,9 @@ def describe(ep: str, data: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 class Report(NamedTuple):
-    seq: int     # global order (shared by both endpoints and log events)
+    seq: int     # global order (shared by all endpoints and log events)
     t_ns: int    # time.monotonic_ns() when the transfer completed
-    ep: str      # "kbd" or "mouse"
+    ep: str      # "kbd", "mouse" or "abs"
     data: bytes
     gen: int = 0  # connection generation (increments on every (re-)acquisition)
 
@@ -653,7 +711,7 @@ class Expected(NamedTuple):
     note: str = ""
 
 
-VERBS = ("text", "key", "move", "click", "button", "scroll", "delay", "release")
+VERBS = ("text", "key", "move", "move_to", "click", "button", "scroll", "delay", "release")
 
 
 def _is_int(v: Any) -> bool:
@@ -677,9 +735,14 @@ class ReferenceEncoder:
       * releasing a key compacts the key array; new keys are appended.
       * move/scroll use :func:`split_move`; a zero move/scroll emits nothing.
       * click: press, wait hold_ms, release, wait interval_ms, next press.
-      * a "release" step always emits an all-released report on both
-        endpoints, keyboard first (API.md section 10).
+      * a "release" step always emits an all-released report on the keyboard
+        and mouse endpoints, keyboard first (API.md section 10).
       * in boot mouse protocol, scroll emits nothing (no wheel in 3-byte reports).
+      * move_to emits one absolute report (buttons, wheel and pan zero); if the
+        target equals the position last reported on that interface, it first
+        emits the point one unit to the right (one to the left at x = 32767).
+        The last position starts at (0, 0), like a host's.  In boot mouse
+        protocol move_to emits nothing (a boot host does not read that interface).
     """
 
     def __init__(self, caps: bool = False, key_delay_ms: int = 5, boot_mouse: bool = False,
@@ -692,12 +755,14 @@ class ReferenceEncoder:
         for u in held_keys:
             self._press(u)
         self.buttons = held_buttons
+        self.abs_pos = (0, 0)
         self._pending_gap = 0.0
 
     # -- state helpers -----------------------------------------------------
     def copy(self) -> "ReferenceEncoder":
         e = ReferenceEncoder(self.caps, self.key_delay_ms, self.boot_mouse)
         e.mods, e.keys, e.buttons, e._pending_gap = self.mods, list(self.keys), self.buttons, self._pending_gap
+        e.abs_pos = self.abs_pos
         return e
 
     def _press(self, u: int) -> bool:
@@ -800,6 +865,18 @@ class ReferenceEncoder:
             self._emit(out, "mouse", self._mouse(ddx, ddy), delay_ms if out else 0)
         return out
 
+    def move_to(self, x: int, y: int, screen: Optional[Sequence[int]] = None) -> List[Expected]:
+        if screen is not None:
+            x, y = pixel_to_abs(x, screen[0]), pixel_to_abs(y, screen[1])
+        out: List[Expected] = []
+        if self.boot_mouse:
+            return out
+        if (x, y) == self.abs_pos:
+            self._emit(out, "abs", abs_bytes(x + 1 if x < ABS_MAX else x - 1, y), 0, "beside")
+        self._emit(out, "abs", abs_bytes(x, y), 0)
+        self.abs_pos = (x, y)
+        return out
+
     def click(self, button: str = "left", count: int = 1, hold_ms: int = 20,
               interval_ms: int = 60) -> List[Expected]:
         bit = BUTTON_BITS[button]
@@ -893,6 +970,18 @@ class ReferenceEncoder:
                 raise bad("move value out of range")
             opt_int("step", 1, 127)
             opt_int("delay_ms", 0, None)
+        elif verb == "move_to":
+            if not (isinstance(val, list) and len(val) == 2 and all(_is_int(v) for v in val)):
+                raise bad("move_to must be [x, y] integers")
+            if any(not 0 <= v <= ABS_MAX for v in val):
+                raise bad("move_to value out of range")
+            if "screen" in step:
+                scr = step["screen"]
+                if not (isinstance(scr, list) and len(scr) == 2 and all(_is_int(v) for v in scr)) or \
+                        any(not 1 <= v <= ABS_MAX for v in scr):
+                    raise bad("screen must be [width, height] integers 1..32767")
+                if val[0] >= scr[0] or val[1] >= scr[1]:
+                    raise bad("move_to outside the screen")
         elif verb == "click":
             if val not in BUTTON_BITS:
                 raise bad("unknown button %r" % (val,))
@@ -935,6 +1024,8 @@ class ReferenceEncoder:
             if verb == "move":
                 return self.move(step["move"][0], step["move"][1], step.get("step", 127),
                                  step.get("delay_ms", 0))
+            if verb == "move_to":
+                return self.move_to(step["move_to"][0], step["move_to"][1], step.get("screen"))
             if verb == "click":
                 return self.click(step["click"], step.get("count", 1), step.get("hold_ms", 20),
                                   step.get("interval_ms", 60))
@@ -1342,6 +1433,36 @@ def verify_mouse_report_descriptor(rd: ReportDescriptor) -> List[str]:
     return p
 
 
+def verify_abs_report_descriptor(rd: ReportDescriptor) -> List[str]:
+    p = []
+    if rd.report_ids:
+        p.append("absolute mouse report descriptor uses report IDs %s (API.md: none)" % rd.report_ids)
+    if (1, 0x00010002) not in rd.collections:
+        p.append("no Application collection Generic Desktop / Mouse")
+    if rd.bits("Input") != 8 * ABS_REPORT_LEN:
+        p.append("absolute mouse input report is %d bits, expected %d" % (rd.bits("Input"), 8 * ABS_REPORT_LEN))
+    b = rd.find("Input", 0x00090001)
+    if b is None or b.bit_offset != 0 or b.size != 1 or [u & 0xFFFF for u in b.all_usages()] != [1, 2, 3]:
+        p.append("buttons are not exactly 1-3 at bits 0-2 (more buttons make Linux add a joystick device)")
+    for usage, name, off in ((0x00010030, "X", 8), (0x00010031, "Y", 24)):
+        f = rd.find("Input", usage)
+        if f is None:
+            p.append("no %s field" % name)
+            continue
+        bit = f.bit_offset + f.all_usages().index(usage) * f.size
+        if bit != off or f.size != 16:
+            p.append("%s is at bit %d size %d, expected bit %d size 16" % (name, bit, f.size, off))
+        if f.relative:
+            p.append("%s is relative, expected absolute" % name)
+        if (f.logical_min, f.logical_max) != (0, ABS_MAX):
+            p.append("%s logical range %d..%d, expected 0..%d" % (name, f.logical_min, f.logical_max, ABS_MAX))
+    for usage, name, off in ((0x00010038, "Wheel", 40), (0x000C0238, "AC Pan", 48)):
+        f = rd.find("Input", usage)
+        if f is None or f.bit_offset != off or f.size != 8 or not f.relative:
+            p.append("%s is not a relative 8-bit field at bit %d" % (name, off))
+    return p
+
+
 def verify_usb_descriptors(dev: Dict[str, int], cfg: Dict[str, Any], speed: Optional[int] = None,
                            report_descs: Optional[Dict[int, bytes]] = None) -> List[str]:
     """All API.md section 9 checks on parsed descriptors. Returns a list of problems."""
@@ -1354,9 +1475,10 @@ def verify_usb_descriptors(dev: Dict[str, int], cfg: Dict[str, Any], speed: Opti
         p.append("configuration says self-powered; API.md: bus powered")
     if not cfg["remote_wakeup"]:
         p.append("configuration does not advertise remote wakeup")
-    if cfg["bNumInterfaces"] != 2:
-        p.append("bNumInterfaces = %d, expected 2" % cfg["bNumInterfaces"])
-    want = {0: (1, 1, KBD_EP, 8), 1: (1, 2, MOUSE_EP, 5)}
+    if cfg["bNumInterfaces"] != len(HID_INTFS):
+        p.append("bNumInterfaces = %d, expected %d" % (cfg["bNumInterfaces"], len(HID_INTFS)))
+    want = {KBD_INTF: (1, 1, KBD_EP, KBD_REPORT_LEN), MOUSE_INTF: (1, 2, MOUSE_EP, MOUSE_REPORT_LEN),
+            ABS_INTF: (0, 0, ABS_EP, ABS_REPORT_LEN)}
     for num, (sub, proto, ep, minpkt) in want.items():
         alts = [i for i in cfg["interfaces"] if i["bInterfaceNumber"] == num and i["bAlternateSetting"] == 0]
         if not alts:
@@ -1384,6 +1506,8 @@ def verify_usb_descriptors(dev: Dict[str, int], cfg: Dict[str, Any], speed: Opti
             p += verify_keyboard_report_descriptor(parse_report_descriptor(report_descs[KBD_INTF]))
         if MOUSE_INTF in report_descs:
             p += verify_mouse_report_descriptor(parse_report_descriptor(report_descs[MOUSE_INTF]))
+        if ABS_INTF in report_descs:
+            p += verify_abs_report_descriptor(parse_report_descriptor(report_descs[ABS_INTF]))
     return p
 
 
@@ -1392,7 +1516,7 @@ def verify_usb_descriptors(dev: Dict[str, int], cfg: Dict[str, Any], speed: Opti
 # ---------------------------------------------------------------------------
 
 class ReportLog:
-    """Thread-safe ordered log of reports (both endpoints) and harness events.
+    """Thread-safe ordered log of reports (all endpoints) and harness events.
 
     Every entry gets a global sequence number from one counter, so the order
     of entries across endpoints is the order in which completions were
@@ -1405,9 +1529,9 @@ class ReportLog:
         self._reports: List[Report] = []
         self._events: List[LogEvent] = []
         self._seq = 0
-        self._last: Dict[str, Optional[Report]] = {"kbd": None, "mouse": None}
-        self._last_t: Dict[Optional[str], int] = {None: 0, "kbd": 0, "mouse": 0}
-        self.total: Dict[str, int] = {"kbd": 0, "mouse": 0}
+        self._last: Dict[str, Optional[Report]] = {ep: None for ep in EP_ADDR}
+        self._last_t: Dict[Optional[str], int] = {None: 0, **{ep: 0 for ep in EP_ADDR}}
+        self.total: Dict[str, int] = {ep: 0 for ep in EP_ADDR}
 
     # -- producers ---------------------------------------------------------
     def append(self, ep: str, data: bytes, t_ns: Optional[int] = None, gen: int = 0) -> Report:
@@ -1433,7 +1557,7 @@ class ReportLog:
     def reset_state(self) -> None:
         """Forget the host-side key/button state (device was disconnected)."""
         with self._cond:
-            self._last = {"kbd": None, "mouse": None}
+            self._last = {ep: None for ep in EP_ADDR}
 
     # -- queries -----------------------------------------------------------
     def mark(self) -> int:
@@ -1474,6 +1598,14 @@ class ReportLog:
     def mouse_buttons(self) -> int:
         r = self.last("mouse")
         return r.data[0] if r and r.data else 0
+
+    def abs_position(self) -> Optional[Tuple[int, int]]:
+        """Last position reported on the absolute interface (None: none since connect)."""
+        r = self.last("abs")
+        if r is None or len(r.data) != ABS_REPORT_LEN:
+            return None
+        a = parse_abs(r.data)
+        return a.x, a.y
 
     def clear(self) -> None:
         """Drop stored reports and events (sequence numbers keep increasing)."""
@@ -1586,7 +1718,7 @@ def interface_status(devname: str, root: str = SYSFS_USB) -> Dict[str, Dict[str,
 
 
 def isolation_problems(devname: str, root: str = SYSFS_USB, require_claimed: bool = False,
-                       interfaces: Sequence[int] = (KBD_INTF, MOUSE_INTF)) -> List[str]:
+                       interfaces: Sequence[int] = HID_INTFS) -> List[str]:
     """Problems that break HID isolation for this device (empty list = isolated).
 
     A HID interface is isolated when no kernel driver is bound (driver absent)
@@ -1704,7 +1836,7 @@ class _Slot:
 # ---------------------------------------------------------------------------
 
 class HIDHost:
-    """Fake USB host: claims both ESPKB HID interfaces and logs every report.
+    """Fake USB host: claims all ESPKB HID interfaces and logs every report.
 
     Usage::
 
@@ -1751,17 +1883,17 @@ class HIDHost:
         self._running = False
         self._lost = threading.Event()
         self._lost_reason = ""
-        self._paused = {"kbd": False, "mouse": False}
+        self._paused = {ep: False for ep in EP_ADDR}
         self._la: Optional[_LibusbAsync] = None
-        self._slots: Dict[str, List[_Slot]] = {"kbd": [], "mouse": []}
+        self._slots: Dict[str, List[_Slot]] = {ep: [] for ep in EP_ADDR}
         self._slot_by_key: Dict[int, _Slot] = {}
         self._flight = threading.Condition()
         self._c_callback: Any = None
         self._threads: List[threading.Thread] = []
         self._sync_threads: Dict[str, threading.Thread] = {}
-        self._sync_idle = {"kbd": threading.Event(), "mouse": threading.Event()}
+        self._sync_idle = {ep: threading.Event() for ep in EP_ADDR}
         self._handle_value = 0
-        self.max_packet = {"kbd": 8, "mouse": 8}  # per endpoint, from the descriptors at acquisition
+        self.max_packet = {ep: 8 for ep in EP_ADDR}  # per endpoint, from the descriptors at acquisition
 
     # -- context manager ---------------------------------------------------
     def __enter__(self) -> "HIDHost":
@@ -1785,7 +1917,7 @@ class HIDHost:
         if self.mode == "async":
             self._la = _LibusbAsync()
             self._c_callback = self._la.cb_type(self._on_transfer)
-            for ep in ("kbd", "mouse"):
+            for ep in EP_ADDR:
                 for _ in range(self.transfers):
                     s = _Slot(self._la, ep)
                     self._slots[ep].append(s)
@@ -1831,7 +1963,7 @@ class HIDHost:
             if t is not threading.current_thread():
                 t.join(timeout=2.0)
         self._threads = []
-        for ep in ("kbd", "mouse"):
+        for ep in EP_ADDR:
             for s in self._slots[ep]:
                 if not s.in_flight:
                     s.free()
@@ -1898,7 +2030,7 @@ class HIDHost:
             time.sleep(0.05)
         with self._dev_lock:
             dev._ctx.managed_open()
-            for intf in (KBD_INTF, MOUSE_INTF):
+            for intf in HID_INTFS:
                 try:
                     active = dev.is_kernel_driver_active(intf)
                 except (NotImplementedError, usb.core.USBError):
@@ -1909,7 +2041,7 @@ class HIDHost:
                     self.log.event("detach", interface=intf)
                     self._say("detached kernel driver from interface %d" % intf)
             try:
-                for intf in (KBD_INTF, MOUSE_INTF):
+                for intf in HID_INTFS:
                     usb.util.claim_interface(dev, intf)
             except usb.core.USBError as e:
                 usb.util.dispose_resources(dev)
@@ -1919,7 +2051,7 @@ class HIDHost:
                 raise IsolationError("cannot claim HID interfaces of %s: %s" % (devname, e))
             problems = isolation_problems(devname, self.sysfs_root, require_claimed=True)
             if problems:
-                for intf in (KBD_INTF, MOUSE_INTF):
+                for intf in HID_INTFS:
                     try:
                         usb.util.release_interface(dev, intf)
                     except usb.core.USBError:
@@ -1935,10 +2067,13 @@ class HIDHost:
             self.log.reset_state()
             self._lost.clear()
             self.protocol = {KBD_INTF: PROTOCOL_REPORT, MOUSE_INTF: PROTOCOL_REPORT}
-            # Behave like a normal host after enumeration: idle 0, report protocol, LED sync.
-            for intf in (KBD_INTF, MOUSE_INTF):
-                for fn in (lambda: self._ctrl_out(HID_SET_IDLE, 0, intf),
-                           lambda: self._ctrl_out(HID_SET_PROTOCOL, PROTOCOL_REPORT, intf)):
+            # Behave like a normal host after enumeration: idle 0, report protocol (boot
+            # interfaces only), LED sync.
+            for intf in HID_INTFS:
+                setup = [lambda: self._ctrl_out(HID_SET_IDLE, 0, intf)]
+                if intf in self.protocol:
+                    setup.append(lambda: self._ctrl_out(HID_SET_PROTOCOL, PROTOCOL_REPORT, intf))
+                for fn in setup:
                     try:
                         fn()
                     except Exception as e:  # a STALL here is legal
@@ -1976,11 +2111,11 @@ class HIDHost:
 
     def _start_polling(self) -> None:
         if self.mode == "async":
-            for ep in ("kbd", "mouse"):
+            for ep in EP_ADDR:
                 if not self._paused[ep]:
                     self._submit_ep(ep)
         else:
-            for ep in ("kbd", "mouse"):
+            for ep in EP_ADDR:
                 t = threading.Thread(target=self._sync_reader, args=(ep, self.generation),
                                      name="hidhost-%s" % ep, daemon=True)
                 self._sync_threads[ep] = t
@@ -1991,7 +2126,7 @@ class HIDHost:
         self._set_connected(False)
         with self._dev_lock:
             if self.mode == "async":
-                drained = self._cancel_and_drain(("kbd", "mouse"), 3.0)
+                drained = self._cancel_and_drain(tuple(EP_ADDR), 3.0)
             else:
                 for t in self._sync_threads.values():
                     t.join(timeout=2.0)
@@ -2002,7 +2137,7 @@ class HIDHost:
                 import usb.core
                 import usb.util
                 if drained:
-                    for intf in (KBD_INTF, MOUSE_INTF):
+                    for intf in HID_INTFS:
                         try:
                             usb.util.release_interface(dev, intf)
                         except (usb.core.USBError, ValueError):
@@ -2126,7 +2261,7 @@ class HIDHost:
 
     def _wait_drained(self, ep: Optional[str], timeout: float) -> bool:
         deadline = time.monotonic() + timeout
-        eps = [ep] if ep else ["kbd", "mouse"]
+        eps = [ep] if ep else list(EP_ADDR)
         with self._flight:
             while any(s.in_flight for e in eps for s in self._slots[e]):
                 left = deadline - time.monotonic()
@@ -2165,7 +2300,7 @@ class HIDHost:
 
     # -- pause / resume ----------------------------------------------------
     def pause(self, ep: str, timeout: float = 2.0) -> None:
-        """Stop polling an endpoint ("kbd" or "mouse"), like a host that stops taking reports.
+        """Stop polling an endpoint ("kbd", "mouse" or "abs"), like a host that stops taking reports.
         Reports already completed are still logged."""
         self._paused[ep] = True
         if self.mode == "async":
@@ -2189,7 +2324,7 @@ class HIDHost:
         return self._paused[ep]
 
     def resume_all(self) -> None:
-        for ep in ("kbd", "mouse"):
+        for ep in EP_ADDR:
             if self._paused[ep]:
                 self.resume(ep)
 
@@ -2199,7 +2334,7 @@ class HIDHost:
         return {n: interface_status(n, self.sysfs_root) for n in names}
 
     def assert_isolated(self, wait_s: float = 10.0) -> None:
-        """Raise IsolationError unless the device is acquired by this host and both
+        """Raise IsolationError unless the device is acquired by this host and all
         HID interfaces are claimed through usbfs (never usbhid).  Waits up to
         wait_s for a re-acquisition in progress (e.g. after a device reboot)."""
         if not self._running:
@@ -2282,7 +2417,7 @@ class HIDHost:
         dev = parse_device_descriptor(self.device_descriptor_raw())
         cfg_raw = self.config_descriptor_raw()
         cfg = parse_config_descriptor(cfg_raw)
-        rds = {intf: self.report_descriptor_raw(intf) for intf in (KBD_INTF, MOUSE_INTF)}
+        rds = {intf: self.report_descriptor_raw(intf) for intf in HID_INTFS}
         speed = self.speed
         return {"device": dev, "config": cfg, "config_raw": cfg_raw, "report_descriptors": rds,
                 "speed": speed, "problems": verify_usb_descriptors(dev, cfg, speed, rds)}
@@ -2322,6 +2457,12 @@ class HIDHost:
 
     def mouse_buttons(self) -> int:
         return self.log.mouse_buttons()
+
+    def abs_reports(self, since: int = 0) -> List[Report]:
+        return self.log.reports(since, "abs")
+
+    def abs_position(self) -> Optional[Tuple[int, int]]:
+        return self.log.abs_position()
 
     def text_since(self, since: int, caps: bool = False, strict: bool = True) -> str:
         return kbd_text(self.kbd_reports(since), caps=caps, strict=strict)
@@ -2364,7 +2505,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             import usb.core
             dev = usb.core.find(idVendor=args.vid, idProduct=args.pid)
             if dev is not None:
-                for intf in (KBD_INTF, MOUSE_INTF):
+                for intf in HID_INTFS:
                     try:
                         if dev.is_kernel_driver_active(intf):
                             dev.detach_kernel_driver(intf)  # never re-attached
@@ -2471,7 +2612,7 @@ def _cmd_leds(args: argparse.Namespace) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="hidhost.py",
-        description="Fake USB host for the ESPKB HID device (303a:4004). Claims both HID "
+        description="Fake USB host for the ESPKB HID device (303a:4004). Claims all three HID "
                     "interfaces over libusb, after verifying that the kernel usbhid driver is not "
                     "bound, so the device's keystrokes never reach the local desktop.",
         epilog="Only one program can claim the device at a time: stop the test suite before "

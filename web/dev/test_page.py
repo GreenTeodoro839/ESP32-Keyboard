@@ -14,7 +14,10 @@ Uses system Chrome (channel="chrome") by default. Screenshots go to --shots (def
 """
 import argparse
 import json
+import os
 import pathlib
+import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -843,6 +846,189 @@ def t_shots(b, m, a):
         c.close()
 
 
+def fw_image(version="9.9.9", project="espkb", chip=9, magic=0xE9, sha=bytes(range(0xA0, 0xC0)), size=300000):
+    """A file that starts like an ESP-IDF app image (image header, segment header, app descriptor)."""
+    img = bytearray(os.urandom(size))
+    img[:288] = bytes(min(288, size))
+    if size >= 288:
+        img[0] = magic
+        struct.pack_into("<H", img, 12, chip)
+        struct.pack_into("<I", img, 32, 0xABCD5432)
+        img[48:48 + len(version)] = version.encode()
+        img[80:80 + len(project)] = project.encode()
+        img[112:120] = b"12:34:56"
+        img[128:139] = b"Nov 12 2026"
+        img[176:208] = sha
+    return bytes(img)
+
+
+def t_ota(b, a):
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="espkb-ota-"))
+    m = Mock(a.port + 3, "--ota-rate", "150000")
+
+    def img(name, **kw):
+        p = tmp / name
+        p.write_bytes(fw_image(**kw))
+        return str(p)
+
+    def open_ota(pg):
+        pg.click("#bSet")
+        pg.wait_for_function("document.getElementById('cHost').value === 'espkb'")
+
+    def pick(pg, path, target="otaInfo"):
+        pg.evaluate("document.getElementById('otaMsg').textContent = ''; document.getElementById('otaInfo').textContent = ''")
+        pg.set_input_files("#otaFile", path)
+        pg.wait_for_function(f"document.getElementById('{target}').textContent !== ''", timeout=3000)
+
+    def upload(pg):
+        said = []
+        pg.once("dialog", lambda d: (said.append(d.message), d.accept()))
+        pg.click("#bOta")
+        return said
+
+    def ota_posts(since):
+        return [h for h in m.http(since) if h["path"] == "/api/ota" and h["method"] == "POST"]
+
+    net_noise = ("ERR_CONNECTION", "WebSocket", "establish a connection", "Connection refused", "Connection terminated",
+                 "ERR_EMPTY_RESPONSE", "Failed to load resource")
+    try:
+        c, pg = open_page(b, m.page)
+        c2, pg2 = open_page(b, m.page)          # a second client that only watches
+        open_ota(pg)
+        check("ota: section shown, upload disabled until a file is chosen", pg.is_visible("#fsOta") and pg.is_disabled("#bOta"))
+        info = pg.inner_text("#info")
+        check("ota: device info shows build, firmware id and slot", "00c0ffee00c0ffee" in info and "ota_0" in info and "Nov 11 2026" in info, info)
+
+        # files that cannot be a firmware for this device are refused before anything is sent
+        for name, kw, want in [("garbage.bin", {"magic": 0x00}, "不是固件文件"), ("tiny.bin", {"size": 100}, "不是固件文件"),
+                               ("other.bin", {"project": "blink"}, "不是 ESPKB"), ("c3.bin", {"chip": 5}, "ESP32-S3")]:
+            s = m.mark()
+            pick(pg, img(name, **kw), "otaMsg")
+            check(f"ota: {name} refused locally", want in pg.inner_text("#otaMsg") and pg.is_disabled("#bOta") and not ota_posts(s),
+                  pg.inner_text("#otaMsg"))
+        pick(pg, img("same.bin", sha=bytes.fromhex("00c0ffee00c0ffee") + bytes(24)))
+        check("ota: image identical to the running firmware is pointed out", "相同" in pg.inner_text("#otaInfo"), pg.inner_text("#otaInfo"))
+
+        pick(pg, img("firmware.bin", version="9.9.9"))
+        info = pg.inner_text("#otaInfo")
+        check("ota: chosen image described (version, build time, size)",
+              "9.9.9" in info and "Nov 12 2026 12:34:56" in info and "293 KB" in info and pg.is_enabled("#bOta"), info)
+        s = m.mark()
+        pg.once("dialog", lambda d: d.dismiss())
+        pg.click("#bOta")
+        pg.wait_for_timeout(300)
+        check("ota: declining the confirmation sends nothing", not m.http(s) and pg.is_enabled("#bOta"), m.http(s))
+
+        # the update itself
+        s = m.mark()
+        said = upload(pg)
+        pg.wait_for_function("/正在上传… [1-9]/.test(document.getElementById('otaMsg').textContent)", timeout=6000)
+        check("ota: confirmation names the running and the new version", said and "1.0.0-mock" in said[0] and "9.9.9" in said[0] and "保留" in said[0], said)
+        check("ota: progress bar shown, controls locked, cancel offered",
+              pg.is_visible("#otaProg") and pg.is_disabled("#bOta") and pg.is_disabled("#otaFile") and pg.is_visible("#bOtaX"))
+        pg2.wait_for_selector("#bn-otaRun", timeout=4000)
+        check("ota: other clients see the update running", "更新固件" in pg2.inner_text("#bn-otaRun"), pg2.inner_text("#bn-otaRun"))
+        if a.shots:
+            pg.set_viewport_size({"width": 1280, "height": 1100})
+            pg.locator("#fsOta").scroll_into_view_if_needed()
+            pg.screenshot(path=f"{a.shots}/ota-uploading.png")
+        pg.wait_for_function("document.getElementById('otaMsg').textContent.indexOf('设备正在重启') >= 0", timeout=10000)
+        posts = ota_posts(s)
+        check("ota: image sent once as the raw body of POST /api/ota", len(posts) == 1 and posts[0]["body"] == {"binary": 300000}, posts)
+        check("ota: asked the device first (GET /api/ota)", any(h["path"] == "/api/ota" and h["method"] == "GET" for h in m.http(s)))
+        check("ota: restarting banner, controls stay locked until the device is back",
+              pg.is_visible("#bn-reboot2") and pg.is_disabled("#bOta") and pg.is_hidden("#bOtaX"))
+        # the device comes back with the new firmware; the page reloads itself and reports
+        pg.wait_for_function("document.getElementById('toasts').textContent.indexOf('固件更新成功') >= 0", timeout=20000)
+        check("ota: success reported after the reboot (page reloaded)",
+              "1.0.0-mock → 9.9.9" in pg.inner_text("#toasts") and pg.is_hidden("#ovSet"), pg.inner_text("#toasts"))
+        pg.wait_for_function("document.getElementById('connTxt').textContent.indexOf('已连接') === 0", timeout=8000)
+        pg2.wait_for_selector("#bn-fw", timeout=10000)
+        check("ota: other clients are told to reload", "9.9.9" in pg2.inner_text("#bn-fw") and "刷新" in pg2.inner_text("#bn-fw"), pg2.inner_text("#bn-fw"))
+        check("ota: no banner about a running update left", not pg.is_visible("#bn-otaRun") and not pg2.is_visible("#bn-otaRun"))
+        c2.close()
+
+        # unsent text is not thrown away by a reload: a banner offers it instead
+        open_ota(pg)
+        check("ota: info shows the new firmware", "9.9.9" in pg.inner_text("#info") and "ota_1" in pg.inner_text("#info"), pg.inner_text("#info"))
+        pg.evaluate("document.getElementById('txt').value = 'unsent text'")
+        pick(pg, img("fw2.bin", version="9.9.10", sha=bytes(range(0x10, 0x30))))
+        upload(pg)
+        pg.wait_for_selector("#bn-fw", timeout=25000)
+        check("ota: with unsent text the page asks before reloading (settings closed so the banner shows)",
+              "固件更新成功：9.9.9 → 9.9.10" in pg.inner_text("#bn-fw") and pg.is_hidden("#ovSet") and pg.input_value("#txt") == "unsent text",
+              pg.inner_text("#bn-fw"))
+        pg.click("#bn-fw button")
+        pg.wait_for_function("document.getElementById('connTxt').textContent.indexOf('已连接') === 0 && document.getElementById('txt').value === ''", timeout=8000)
+
+        # the new firmware does not survive its first boot: the device comes back with the old one
+        m.state(ota_rollback=True)
+        open_ota(pg)
+        pick(pg, img("fw3.bin", version="9.9.11", sha=bytes(range(0x40, 0x60))))
+        upload(pg)
+        pg.wait_for_selector("#bn-fw", timeout=25000)
+        check("ota: rollback detected and explained",
+              "回到原固件" in pg.inner_text("#bn-fw") and "9.9.10" in pg.inner_text("#bn-fw") and "msg err" in pg.get_attribute("#otaMsg", "class"),
+              pg.inner_text("#bn-fw"))
+        m.state(ota_rollback=False)
+
+        # an error reported by the device
+        pg.reload()
+        pg.wait_for_function("document.getElementById('connTxt').textContent.indexOf('已连接') === 0", timeout=8000)
+        open_ota(pg)
+        m.state(ota_fail={"error": "internal", "message": "writing flash failed at offset 65536: ESP_ERR_FLASH_OP_FAIL"})
+        pick(pg, img("fw4.bin", version="9.9.12", sha=bytes(range(0x60, 0x80))))
+        s = m.mark()
+        upload(pg)
+        pg.wait_for_function("document.getElementById('otaMsg').textContent.indexOf('更新失败') === 0", timeout=10000)
+        t = pg.inner_text("#otaMsg")
+        check("ota: device error shown, old firmware keeps running, retry possible",
+              "设备内部错误" in t and "ESP_ERR_FLASH_OP_FAIL" in t and "原固件" in t and pg.is_enabled("#bOta") and pg.is_hidden("#otaProg")
+              and not pg.is_visible("#bn-reboot2"), t)
+        m.state(ota_fail=None)
+
+        # cancelling an upload
+        pick(pg, img("fw5.bin", version="9.9.13", sha=bytes(range(0x80, 0xA0)), size=2000000))
+        s = m.mark()
+        upload(pg)
+        pg.wait_for_function("/正在上传… [1-9]/.test(document.getElementById('otaMsg').textContent)", timeout=6000)
+        pg.click("#bOtaX")
+        pg.wait_for_function("document.getElementById('otaMsg').textContent.indexOf('更新失败') === 0", timeout=5000)
+        # the mock first works through what the browser had already pushed into the socket
+        failed = wait_for(lambda: [e for e in m.events(s) if "ota_failed" in e], 25)
+        check("ota: cancel aborts the upload; the device drops the partial image",
+              "已取消" in pg.inner_text("#otaMsg") and failed and pg.is_enabled("#bOta"), (pg.inner_text("#otaMsg"), m.events(s)))
+        check("ota: no page errors", not [e for e in pg.errors if not any(x in e for x in net_noise)], pg.errors)
+        c.close()
+    finally:
+        m.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # with a token configured the upload is authenticated
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="espkb-ota-"))
+    m = Mock(a.port + 4, "--token", "s3cret", "--ota-rate", "0")
+    try:
+        c = b.new_context()
+        pg = c.new_page()
+        pg.goto(m.page)
+        pg.wait_for_selector("#ovTok", state="visible", timeout=6000)
+        pg.fill("#tokIn", "s3cret")
+        pg.click("#fTok button.pri")
+        pg.wait_for_function("document.getElementById('connTxt').textContent.indexOf('已连接') === 0", timeout=8000)
+        open_ota(pg)
+        (tmp / "fw.bin").write_bytes(fw_image(version="9.9.9"))
+        pick(pg, str(tmp / "fw.bin"))
+        s = m.mark()
+        upload(pg)
+        pg.wait_for_function("document.getElementById('otaMsg').textContent.indexOf('设备正在重启') >= 0", timeout=10000)
+        posts = ota_posts(s)
+        check("ota: upload carries the token", len(posts) == 1 and posts[0]["authorization"] == "Bearer s3cret", posts)
+        c.close()
+    finally:
+        m.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--headed", action="store_true")
@@ -882,7 +1068,7 @@ def main():
                     check(f"{t.__name__} raised", False, repr(e)[:400])
                 if m.proc is None:
                     m.start()
-            for t in (t_token, t_ap):
+            for t in (t_token, t_ap, t_ota):
                 if a.only and a.only not in t.__name__:
                     continue
                 print(f"== {t.__name__}", flush=True)

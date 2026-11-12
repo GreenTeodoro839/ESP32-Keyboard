@@ -23,6 +23,15 @@ typedef enum { BODY_OK = 0, BODY_TOO_LARGE, BODY_FAILED } body_result_t;
  * close the connection without a response. */
 body_result_t http_read_body(httpd_req_t *req, char **out, size_t *len);
 
+/* If the request announced a body with "Expect: 100-continue", sends the
+ * interim "100 Continue" response and returns true. */
+bool http_expect_continue(httpd_req_t *req);
+
+/* Sends an error for a request whose body has not been read and returns the
+ * handler's result. A small body is left to the server to discard; a large
+ * one is drained with a bound and the connection closed (ESP_FAIL). */
+esp_err_t http_reject(httpd_req_t *req, espkb_err_t err, const char *msg);
+
 /* Sends 413 and makes the server close the connection (returns ESP_FAIL). */
 esp_err_t http_reject_too_large(httpd_req_t *req);
 /* Reads and discards an unread request body (up to 512 KB, at most 3 s) so a
@@ -31,6 +40,8 @@ bool http_drain_body(httpd_req_t *req);
 
 /* True if the query string has key=1/true/yes. */
 bool http_query_flag(httpd_req_t *req, const char *key);
+/* Like http_query_flag, but returns def when the key is absent and false for any other value. */
+bool http_query_bool(httpd_req_t *req, const char *key, bool def);
 /* True if the request's Content-Type starts with the given type. */
 bool http_content_type_is(httpd_req_t *req, const char *type);
 

@@ -8,9 +8,9 @@
 
 #define ESPKB_NAME        "espkb"
 #define ESPKB_API_VERSION 1
-#define ESPKB_FW_VERSION  "1.0.0"
+#define ESPKB_FW_VERSION  "1.2.0"   /* also the image version, see the top-level CMakeLists.txt */
 
-#define ESPKB_MAX_BODY      65536   /* HTTP request body limit (API.md §1) */
+#define ESPKB_MAX_BODY      65536   /* HTTP request body limit (API.md §1); POST /api/ota is exempt */
 #define ESPKB_MAX_STEPS     512     /* steps per request (API.md §4) */
 #define ESPKB_QUEUE_CAP     32      /* job queue capacity (API.md §3.2) */
 #define ESPKB_WS_MAX_FRAME  8192    /* WebSocket frame limit (API.md §5) */
@@ -33,6 +33,7 @@ typedef enum {
     EK_USB_NOT_READY,
     EK_USB_SUSPENDED,
     EK_TIMEOUT,
+    EK_INTERNAL,
     EK_COUNT
 } espkb_err_t;
 

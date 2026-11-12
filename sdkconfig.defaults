@@ -1,6 +1,8 @@
 # ============================================================
 # ESPKB - ESP32-S3 N16R8 defaults
-# After changing this file: pio run -t fullclean && pio run
+# These are defaults only: an existing sdkconfig.<env> (generated, git-ignored)
+# wins over them. After changing this file delete sdkconfig.esp32-s3-devkitc-1
+# and build again.
 # ============================================================
 
 # ---------- Flash: 16 MB QIO ----------
@@ -12,6 +14,12 @@ CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 # ---------- Partition table ----------
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---------- OTA (firmware update over WiFi) ----------
+# partitions.csv has two app slots. A freshly updated image has to be confirmed
+# by the app (src/ota.c) after its first boot; if it crashes or cannot bring up
+# the network before that, the bootloader returns to the previous image.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # ---------- PSRAM: 8 MB octal ----------
 CONFIG_SPIRAM=y
@@ -33,8 +41,8 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
 
-# ---------- USB (TinyUSB device, 2 HID interfaces) ----------
-CONFIG_TINYUSB_HID_COUNT=2
+# ---------- USB (TinyUSB device, 3 HID interfaces: keyboard, mouse, absolute mouse) ----------
+CONFIG_TINYUSB_HID_COUNT=3
 CONFIG_TINYUSB_SUSPEND_CALLBACK=y
 CONFIG_TINYUSB_RESUME_CALLBACK=y
 CONFIG_TINYUSB_DEBUG_LEVEL=0

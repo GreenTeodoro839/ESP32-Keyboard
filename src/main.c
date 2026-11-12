@@ -7,6 +7,7 @@
  *   http_resp   - answers synchronous HTTP requests when their job finishes
  *   ws_push     - WebSocket status pushes
  *   wifi_mgr    - STA reconnect, fallback AP, scans
+ *   ota         - only while a firmware image is being uploaded (POST /api/ota)
  *   console     - UART0 command line
  *   button      - BOOT button factory reset
  */
@@ -24,6 +25,7 @@
 #include "espkb.h"
 #include "hid_engine.h"
 #include "http_api.h"
+#include "ota.h"
 #include "wifi_mgr.h"
 
 static const char *TAG = "main";
@@ -94,6 +96,7 @@ void app_main(void)
 
     engine_init();      /* USB device + HID engine */
     wifi_mgr_start();
+    ota_init();         /* after WiFi: a freshly updated image is confirmed once the network is up */
     http_api_start();
     xTaskCreate(button_task, "button", 3072, NULL, 2, NULL);
 

@@ -19,7 +19,8 @@ static const char *TAG = "engine";
 #define EV_DONE_KBD   (1u << 4)
 #define EV_DONE_MOUSE (1u << 5)
 #define EV_WAKE       (1u << 6)
-#define EV_ALL        (EV_JOB | EV_ABORT | EV_USB | EV_OWNER | EV_DONE_KBD | EV_DONE_MOUSE | EV_WAKE)
+#define EV_DONE_ABS   (1u << 7)
+#define EV_ALL        (EV_JOB | EV_ABORT | EV_USB | EV_OWNER | EV_DONE_KBD | EV_DONE_MOUSE | EV_WAKE | EV_DONE_ABS)
 
 #define MAX_WS_OWNERS      8
 #define WS_KEEPALIVE_US    (1000 * 1000LL)
@@ -71,6 +72,9 @@ static struct {
     uint8_t last_kbd[8];
     uint8_t last_btns;
     bool force_sync[2];
+    /* Last position reported on the absolute interface. A host starts out at
+     * (0, 0) for a newly enumerated device, and so does this. */
+    uint16_t abs_x, abs_y;
     uint32_t gen_seen;
 
     uint32_t jobs_done;
@@ -246,6 +250,7 @@ static bool housekeeping(void)
         memset(E.last_kbd, 0, sizeof(E.last_kbd));
         E.last_btns = 0;
         E.force_sync[0] = E.force_sync[1] = false;
+        E.abs_x = E.abs_y = 0;
     }
     if (!any_held()) {
         return changed;
@@ -392,6 +397,21 @@ static uint16_t build_mouse(uint8_t r[5], int8_t dx, int8_t dy, int8_t wheel, in
     return usb_hid_boot_protocol(ITF_MOUSE) ? 3 : 5;
 }
 
+/* The absolute interface reports the position only. Buttons and wheel stay on
+ * the relative mouse interface, so every button has exactly one source and the
+ * held-button logic (owners, release, sync) covers them unchanged. */
+static uint16_t build_abs(uint8_t r[ABS_REPORT_LEN], uint16_t x, uint16_t y)
+{
+    r[0] = 0;
+    r[1] = (uint8_t)(x & 0xff);
+    r[2] = (uint8_t)(x >> 8);
+    r[3] = (uint8_t)(y & 0xff);
+    r[4] = (uint8_t)(y >> 8);
+    r[5] = 0;
+    r[6] = 0;
+    return ABS_REPORT_LEN;
+}
+
 /* ---------- report path (engine task only) ---------- */
 
 static void wait_ev(EventBits_t bits, int64_t max_us)
@@ -422,17 +442,22 @@ static bool submit(int itf, const uint8_t *r, uint16_t len)
     lock();
     if (itf == ITF_KBD) {
         memcpy(E.last_kbd, r, 8);
-    } else {
+        E.force_sync[itf] = false;
+    } else if (itf == ITF_MOUSE) {
         E.last_btns = r[0];
+        E.force_sync[itf] = false;
+    } else {
+        E.abs_x = (uint16_t)(r[1] | (r[2] << 8));
+        E.abs_y = (uint16_t)(r[3] | (r[4] << 8));
     }
-    E.force_sync[itf] = false;
     unlock();
     return true;
 }
 
 /* Non-blocking: sends a report reflecting the current state on any idle
  * interface whose last report differs from it (owner timeouts, releases after
- * a failure, resume after suspend) or where a release was forced. */
+ * a failure, resume after suspend) or where a release was forced. The absolute
+ * interface holds no state, so there is never anything to sync on it. */
 static void try_sync(void)
 {
     if (!usb_hid_ready()) {
@@ -476,7 +501,7 @@ static espkb_err_t job_alive(job_t *job, uint32_t gen0)
 static espkb_err_t wait_idle(job_t *job, uint32_t gen0, int itf)
 {
     int64_t deadline = now_us() + REPORT_TIMEOUT_US;
-    EventBits_t done = itf == ITF_KBD ? EV_DONE_KBD : EV_DONE_MOUSE;
+    EventBits_t done = itf == ITF_KBD ? EV_DONE_KBD : itf == ITF_MOUSE ? EV_DONE_MOUSE : EV_DONE_ABS;
     while (usb_hid_inflight(itf)) {
         espkb_err_t e = job_alive(job, gen0);
         if (e) {
@@ -517,8 +542,9 @@ static espkb_err_t ensure_awake(job_t *job, uint32_t gen0)
 }
 
 /* Sends one report built from the current state and waits for the host to
- * take it (at most 1000 ms). */
-static espkb_err_t send_report(job_t *job, uint32_t gen0, int itf, int8_t dx, int8_t dy, int8_t wheel,
+ * take it (at most 1000 ms). a, b: the relative movement on ITF_MOUSE (int8
+ * range), the position on ITF_ABS (0..ABS_MAX); unused on ITF_KBD. */
+static espkb_err_t send_report(job_t *job, uint32_t gen0, int itf, int16_t a, int16_t b, int8_t wheel,
                                int8_t pan)
 {
     espkb_err_t e = wait_idle(job, gen0, itf);
@@ -537,8 +563,10 @@ static espkb_err_t send_report(job_t *job, uint32_t gen0, int itf, int8_t dx, in
         if (itf == ITF_KBD) {
             build_kbd(r);
             len = 8;
+        } else if (itf == ITF_MOUSE) {
+            len = build_mouse(r, (int8_t)a, (int8_t)b, wheel, pan);
         } else {
-            len = build_mouse(r, dx, dy, wheel, pan);
+            len = build_abs(r, (uint16_t)a, (uint16_t)b);
         }
         unlock();
         if (submit(itf, r, len)) {
@@ -565,6 +593,12 @@ static espkb_err_t send_report(job_t *job, uint32_t gen0, int itf, int8_t dx, in
 #define SEND_MOUSE(dx, dy, wh, pan)                                       \
     do {                                                                  \
         espkb_err_t _e = send_report(job, gen0, ITF_MOUSE, dx, dy, wh, pan); \
+        if (_e) return _e;                                                \
+    } while (0)
+
+#define SEND_ABS(x, y)                                                    \
+    do {                                                                  \
+        espkb_err_t _e = send_report(job, gen0, ITF_ABS, x, y, 0, 0);     \
         if (_e) return _e;                                                \
     } while (0)
 
@@ -816,6 +850,24 @@ static espkb_err_t exec_split(job_t *job, uint32_t gen0, int32_t a, int32_t b, i
     return EK_NONE;
 }
 
+/* Puts the pointer at an absolute position. Linux drops an absolute value equal
+ * to the previous one from the same device, although the pointer may have been
+ * moved since (by the relative interface or by another mouse). So when the
+ * target is the position reported last, go there through the point next to it. */
+static espkb_err_t exec_move_to(job_t *job, uint32_t gen0, const step_t *st)
+{
+    int16_t x = (int16_t)st->a, y = (int16_t)st->b;
+    lock();
+    bool same = E.abs_x == x && E.abs_y == y;
+    unlock();
+    if (same) {
+        int16_t beside = (int16_t)(x < ABS_MAX ? x + 1 : x - 1);
+        SEND_ABS(beside, y);
+    }
+    SEND_ABS(x, y);
+    return EK_NONE;
+}
+
 static espkb_err_t exec_click(job_t *job, uint32_t gen0, const step_t *st)
 {
     uint8_t bit = (uint8_t)(1u << st->button);
@@ -871,6 +923,13 @@ static espkb_err_t exec_step(job_t *job, uint32_t gen0, const step_t *st)
         return exec_key(job, gen0, st);
     case STEP_MOVE:
         return exec_split(job, gen0, st->a, st->b, st->mstep, st->delay_ms, false);
+    case STEP_MOVE_TO:
+        if (usb_hid_boot_protocol(ITF_MOUSE)) {
+            /* A host that put the mouse in boot protocol (BIOS) does not read the
+             * absolute interface: the report would only time out. */
+            return EK_NONE;
+        }
+        return exec_move_to(job, gen0, st);
     case STEP_SCROLL:
         if (usb_hid_boot_protocol(ITF_MOUSE)) {
             return EK_NONE; /* the boot mouse report has no wheel */
@@ -991,6 +1050,9 @@ static void usb_notify(uint32_t bits)
     }
     if (bits & USB_EVT_DONE_MOUSE) {
         ev |= EV_DONE_MOUSE;
+    }
+    if (bits & USB_EVT_DONE_ABS) {
+        ev |= EV_DONE_ABS;
     }
     if (bits & USB_EVT_STATE) {
         ev |= EV_USB;

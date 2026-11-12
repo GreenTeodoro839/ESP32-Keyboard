@@ -7,7 +7,7 @@ import pytest
 
 import hidhost
 import support
-from hidhost import KBD_INTF, MOUSE_INTF
+from hidhost import ABS_INTF, KBD_INTF, MOUSE_INTF
 
 
 @pytest.fixture(scope="module")
@@ -35,17 +35,19 @@ def test_bus_powered_with_remote_wakeup(descs):
     assert cfg["bMaxPower"] > 0
 
 
-def test_two_hid_boot_interfaces(descs):
+def test_three_hid_interfaces(descs):
+    """Boot keyboard, boot mouse, and the absolute mouse (no boot subclass/protocol)."""
     cfg = descs["config"]
-    assert cfg["bNumInterfaces"] == 2
+    assert cfg["bNumInterfaces"] == 3
     by_num = {i["bInterfaceNumber"]: i for i in cfg["interfaces"] if i["bAlternateSetting"] == 0}
     assert (by_num[0]["bInterfaceClass"], by_num[0]["bInterfaceSubClass"], by_num[0]["bInterfaceProtocol"]) == (3, 1, 1)
     assert (by_num[1]["bInterfaceClass"], by_num[1]["bInterfaceSubClass"], by_num[1]["bInterfaceProtocol"]) == (3, 1, 2)
+    assert (by_num[2]["bInterfaceClass"], by_num[2]["bInterfaceSubClass"], by_num[2]["bInterfaceProtocol"]) == (3, 0, 0)
     for i in by_num.values():
         assert i["hid"] is not None, "interface %d has no HID descriptor" % i["bInterfaceNumber"]
 
 
-@pytest.mark.parametrize("intf,ep,minpkt", [(0, 0x81, 8), (1, 0x82, 5)])
+@pytest.mark.parametrize("intf,ep,minpkt", [(0, 0x81, 8), (1, 0x82, 5), (2, 0x83, 7)])
 def test_interrupt_in_endpoints(descs, intf, ep, minpkt):
     i = [x for x in descs["config"]["interfaces"] if x["bInterfaceNumber"] == intf][0]
     eps = {e["bEndpointAddress"]: e for e in i["endpoints"]}
@@ -70,6 +72,11 @@ def test_mouse_report_descriptor(descs):
     assert hidhost.verify_mouse_report_descriptor(rd) == []
 
 
+def test_abs_mouse_report_descriptor(descs):
+    rd = hidhost.parse_report_descriptor(descs["report_descriptors"][ABS_INTF])
+    assert hidhost.verify_abs_report_descriptor(rd) == []
+
+
 def test_hid_descriptor_lengths_match_report_descriptors(descs):
     for i in descs["config"]["interfaces"]:
         want = [d["wDescriptorLength"] for d in i["hid"]["descriptors"] if d["bDescriptorType"] == 0x22]
@@ -77,10 +84,13 @@ def test_hid_descriptor_lengths_match_report_descriptors(descs):
 
 
 def test_observed_report_lengths(dev, hid):
-    _, reps = support.do(hid, lambda: dev.seq([{"key": "a"}, {"move": [3, -3]}, {"click": "left"}]))
+    _, reps = support.do(hid, lambda: dev.seq([{"key": "a"}, {"move": [3, -3]}, {"click": "left"},
+                                               {"move_to": [100, 200]}, {"move_to": [300, 400]}]))
     assert {len(r.data) for r in support.kbd(reps)} == {8}
     assert {len(r.data) for r in support.mouse(reps)} == {5}
+    assert {len(r.data) for r in reps if r.ep == "abs"} == {hidhost.ABS_REPORT_LEN}
     assert len(support.kbd(reps)) == 2 and len(support.mouse(reps)) == 3
+    assert 2 <= len([r for r in reps if r.ep == "abs"]) <= 3   # +1 if (100, 200) was already the last position
 
 
 def test_default_protocol_is_report(hid, dev):

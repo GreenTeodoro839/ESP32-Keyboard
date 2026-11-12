@@ -7,11 +7,17 @@
 #include "esp_err.h"
 
 #define ITF_KBD   0
-#define ITF_MOUSE 1
+#define ITF_MOUSE 1   /* relative mouse; also carries the buttons and the wheel */
+#define ITF_ABS   2   /* absolute pointer: position only, no boot protocol */
+#define ITF_COUNT 3
+
+#define ABS_MAX        32767   /* logical range of the absolute X and Y axes: 0..ABS_MAX */
+#define ABS_REPORT_LEN 7       /* buttons, X (u16 LE), Y (u16 LE), wheel, pan */
 
 #define USB_EVT_DONE_KBD   (1u << 0)
 #define USB_EVT_DONE_MOUSE (1u << 1)
 #define USB_EVT_STATE      (1u << 2)   /* mount/unmount/suspend/resume */
+#define USB_EVT_DONE_ABS   (1u << 3)
 
 /* Called from the TinyUSB task with USB_EVT_* bits. Must not block. */
 typedef void (*usb_hid_notify_fn)(uint32_t bits);
@@ -23,7 +29,7 @@ bool usb_hid_suspended(void);
 bool usb_hid_ready(void);                /* mounted and not suspended */
 bool usb_hid_remote_wakeup_allowed(void);
 uint8_t usb_hid_leds(void);              /* bit0 Num, bit1 Caps, bit2 Scroll */
-bool usb_hid_boot_protocol(int itf);
+bool usb_hid_boot_protocol(int itf);        /* always false for ITF_ABS */
 /* Incremented on every mount and unmount; a change means the host re-enumerated. */
 uint32_t usb_hid_generation(void);
 

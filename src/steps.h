@@ -17,12 +17,14 @@ typedef enum {
     STEP_SCROLL,
     STEP_DELAY,
     STEP_RELEASE,
+    STEP_MOVE_TO,
     STEP_TYPE_COUNT
 } step_type_t;
 
 #define STEP_MASK(t) (1u << (t))
 #define STEP_MASK_ALL ((1u << STEP_TYPE_COUNT) - 1)
-#define STEP_MASK_MOUSE (STEP_MASK(STEP_MOVE) | STEP_MASK(STEP_CLICK) | STEP_MASK(STEP_BUTTON) | STEP_MASK(STEP_SCROLL))
+#define STEP_MASK_MOUSE (STEP_MASK(STEP_MOVE) | STEP_MASK(STEP_MOVE_TO) | STEP_MASK(STEP_CLICK) | \
+                         STEP_MASK(STEP_BUTTON) | STEP_MASK(STEP_SCROLL))
 
 typedef enum { ACT_TAP = 0, ACT_DOWN, ACT_UP } step_action_t;
 
@@ -37,7 +39,7 @@ typedef struct {
     uint8_t mstep;                  /* move: max displacement per report */
     uint16_t repeat;                /* key tap repetitions */
     uint16_t count;                 /* click count */
-    int32_t a, b;                   /* move dx,dy / scroll v,h */
+    int32_t a, b;                   /* move dx,dy / scroll v,h / move_to x,y (0..32767, already scaled) */
     int32_t hold_ms;                /* -1 = default */
     int32_t delay_ms;               /* -1 = default */
     int32_t interval_ms;            /* click interval */

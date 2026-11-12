@@ -4,8 +4,10 @@
 Serves ../index.html at "/" (re-read on every request), implements the HTTP API
 subset the page uses plus the /ws channel, following docs/API.md:
 
-  GET  /api/status  /api/config  /api/wifi/scan  /api/keys
+  GET  /api/status  /api/config  /api/wifi/scan  /api/keys  /api/ota
   POST /api/config  /api/wake  /api/reboot  /api/release
+  POST /api/ota     firmware upload: checks the image header like the device, shows progress in the
+                    status pushes, then "reboots" into the uploaded image (its version / sha256)
   WS   /ws          steps, {"steps":[..]}, step arrays, "id" -> ack, ping -> pong,
                     {"release":true}, status pushes (on connect, on change, every 2 s),
                     per-connection 1000 ms keep-alive release, release on close.
@@ -18,7 +20,9 @@ Mock-only control endpoints (never require a token):
   GET  /mock/log?since=N   -> {"records":[...], "next":N}
   POST /mock/clear         -> forget recorded records
   POST /mock/state         -> merge {"usb":{..},"wifi":{..},"token":"..","push_error":{..}}
-                              into the simulated device and push status
+                              into the simulated device and push status;
+                              "ota_rollback": true  -> an uploaded firmware does not survive its reboot,
+                              "ota_fail": {"error":..,"message":..} -> uploads fail with this error
 
 Binds 127.0.0.1 only. Never talks to real hardware.
 
@@ -30,6 +34,7 @@ import asyncio
 import json
 import pathlib
 import re
+import struct
 import sys
 import time
 
@@ -74,8 +79,25 @@ VERBS = ["text", "key", "move", "click", "button", "scroll", "delay", "release"]
 ERR_HTTP = {
     "bad_request": 400, "bad_step": 400, "unauthorized": 401, "forbidden": 403,
     "not_found": 404, "method_not_allowed": 405, "aborted": 409, "too_large": 413,
-    "busy": 503, "usb_not_ready": 503, "usb_suspended": 503, "timeout": 504,
+    "busy": 503, "usb_not_ready": 503, "usb_suspended": 503, "timeout": 504, "internal": 500,
 }
+OTA_SLOT_SIZE = 0x400000
+OTA_HEAD_SIZE = 288
+
+
+def parse_image_head(head):
+    """Start of an ESP-IDF app image -> firmware identity, or raise DevError like the device."""
+    if len(head) < OTA_HEAD_SIZE or head[0] != 0xE9 or struct.unpack_from("<I", head, 32)[0] != 0xABCD5432:
+        raise DevError("bad_request", "not an ESP application image (send the build's firmware.bin)")
+
+    def s(off, n):
+        return head[off:off + n].split(b"\0")[0].decode("utf-8", "replace")
+
+    if s(80, 32) != "espkb":
+        raise DevError("bad_request", "image is not an espkb firmware")
+    if struct.unpack_from("<H", head, 12)[0] != 9:
+        raise DevError("bad_request", "image is built for a different chip or chip revision")
+    return {"version": s(48, 32), "build": s(128, 16) + " " + s(112, 16), "sha256": head[176:184].hex()}
 
 
 class DevError(Exception):
@@ -210,6 +232,13 @@ class Device:
         self.site = None
         self.runner = None
         self.push_pending = False
+        self.fw = {"version": "1.0.0-mock", "build": "Nov 11 2026 20:14:41", "sha256": "00c0ffee00c0ffee",
+                   "partition": "ota_0"}
+        self.fw_next = None          # identity to boot into at the next reboot
+        self.ota = {"state": "idle", "received": 0, "total": 0}
+        self.ota_message = ""
+        self.ota_rollback = False
+        self.ota_fail = None
 
     # ---- recording -------------------------------------------------------
     def record(self, kind, msg, client=None, **extra):
@@ -229,13 +258,15 @@ class Device:
 
     def status(self):
         return {
-            "device": {"name": "espkb", "api": 1, "version": "1.0.0-mock", "uptime_ms": self.uptime(),
-                       "heap_free": 250000, "heap_min": 230000, "reset_reason": "poweron"},
+            "device": {"name": "espkb", "api": 1, "version": self.fw["version"], "uptime_ms": self.uptime(),
+                       "heap_free": 250000, "heap_min": 230000, "reset_reason": "poweron",
+                       "build": self.fw["build"], "sha256": self.fw["sha256"], "partition": self.fw["partition"]},
             "usb": json.loads(json.dumps(self.usb)),
             "hid": {"busy": self.current is not None, "queued": len(self.queue),
                     "keys": sorted(self.keys), "buttons": [b for b in BUTTONS if b in self.buttons],
                     **self.stats},
             "wifi": dict(self.wifi, hostname=self.config["hostname"]),
+            "ota": dict(self.ota),
             "ws_clients": len(self.clients),
             "auth_required": bool(self.token),
         }
@@ -497,8 +528,11 @@ class Device:
             self.schedule_push()
 
     # ---- reboot ----------------------------------------------------------
-    async def do_reboot(self):
-        await asyncio.sleep(0.5)
+    def other_slot(self):
+        return "ota_1" if self.fw["partition"] == "ota_0" else "ota_0"
+
+    async def do_reboot(self, delay=0.5):
+        await asyncio.sleep(delay)
         self.rebooting = True
         self.record("event", {"reboot": True})
         for c in list(self.clients.values()):
@@ -514,6 +548,11 @@ class Device:
         except Exception as e:
             print("site.stop:", e, file=sys.stderr)
         await asyncio.sleep(self.args.reboot_secs)
+        if self.fw_next and not self.ota_rollback:
+            self.fw = self.fw_next
+        self.fw_next = None
+        self.ota = {"state": "idle", "received": 0, "total": 0}
+        self.ota_message = ""
         self.t0 = time.monotonic() - 0.0
         self.site = web.TCPSite(self.runner, "127.0.0.1", self.args.port)
         await self.site.start()
@@ -547,7 +586,9 @@ def make_app(dev):
             raise web.HTTPServiceUnavailable()
         if path.startswith("/api"):
             body = None
-            if request.can_read_body:
+            if path == "/api/ota" and request.method == "POST":
+                body = {"binary": request.content_length}   # streamed by the handler
+            elif request.can_read_body:
                 raw = await request.text()
                 try:
                     body = json.loads(raw)
@@ -656,6 +697,70 @@ def make_app(dev):
         n = await dev.emergency_release()
         return ok(aborted=n)
 
+    async def ota_get(request):
+        return ok(running=dict(dev.fw, idf="6.1.0", state="valid"),
+                  next={"partition": dev.other_slot(), "size": OTA_SLOT_SIZE},
+                  update=dict(dev.ota, message=dev.ota_message))
+
+    async def ota_post(request):
+        n = request.content_length or 0
+        if n < OTA_HEAD_SIZE:
+            return err("bad_request", "send the firmware image (firmware.bin) as the raw request body with a Content-Length")
+        if n > OTA_SLOT_SIZE:
+            return err("too_large", f"image of {n} bytes does not fit the {OTA_SLOT_SIZE} byte firmware slot")
+        if dev.ota["state"] in ("receiving", "verifying"):
+            return err("busy", "another firmware update is in progress")
+        dev.ota = {"state": "receiving", "received": 0, "total": n}
+        dev.ota_message = ""
+        dev.schedule_push()
+        head, got, failure = b"", 0, None
+        try:
+            async for chunk in request.content.iter_chunked(16384):
+                if len(head) < OTA_HEAD_SIZE:
+                    head += chunk[:OTA_HEAD_SIZE - len(head)]
+                got += len(chunk)
+                if failure is None and len(head) >= OTA_HEAD_SIZE and got - len(chunk) < OTA_HEAD_SIZE:
+                    try:
+                        fw = parse_image_head(head)
+                    except DevError as e:
+                        failure = e          # like the device: keep reading, answer at the end
+                if failure is None:
+                    dev.ota["received"] = got
+                    dev.schedule_push()
+                if dev.args.ota_rate > 0:
+                    await asyncio.sleep(len(chunk) / dev.args.ota_rate)
+        except asyncio.CancelledError:      # the client went away and the server cancelled this handler
+            dev.ota["state"] = "failed"
+            dev.ota_message = f"upload interrupted after {got} of {n} bytes"
+            dev.schedule_push()
+            dev.record("event", {"ota_failed": dev.ota_message})
+            raise
+        except Exception:
+            pass
+        if got != n:
+            failure = DevError("bad_request", f"upload interrupted after {got} of {n} bytes")
+        if failure is None and dev.ota_fail:
+            failure = DevError(dev.ota_fail.get("error", "internal"), dev.ota_fail.get("message", "writing flash failed"))
+        if failure is None:
+            dev.ota["state"] = "verifying"
+            dev.schedule_push()
+            await asyncio.sleep(0.3)
+        if failure is not None:
+            dev.ota["state"] = "failed"
+            dev.ota_message = failure.message
+            dev.schedule_push()
+            dev.record("event", {"ota_failed": failure.message})
+            return err(failure.code, failure.message)
+        reboot = request.query.get("reboot", "1").lower() in ("1", "true", "yes")
+        slot = dev.other_slot()
+        dev.ota["state"] = "done"
+        dev.fw_next = dict(fw, partition=slot)
+        dev.schedule_push()
+        dev.record("event", {"ota_done": fw, "bytes": n, "reboot": reboot})
+        if reboot:
+            asyncio.ensure_future(dev.do_reboot(1.0))
+        return ok(bytes=n, partition=slot, version=fw["version"], reboot=reboot)
+
     async def keys(request):
         return ok(keys={k: v for k, v in KEYS.items()}, buttons=BUTTONS)
 
@@ -678,6 +783,10 @@ def make_app(dev):
                         getattr(dev, k)[kk] = vv
         if "token" in b:
             dev.token = b["token"]
+        if "ota_rollback" in b:
+            dev.ota_rollback = bool(b["ota_rollback"])
+        if "ota_fail" in b:
+            dev.ota_fail = b["ota_fail"]
         if "push_error" in b:
             for c in list(dev.clients.values()):
                 await dev.send(c, b["push_error"])
@@ -695,6 +804,8 @@ def make_app(dev):
     app.router.add_post("/api/reboot", reboot)
     app.router.add_post("/api/release", release)
     app.router.add_get("/api/keys", keys)
+    app.router.add_get("/api/ota", ota_get)
+    app.router.add_post("/api/ota", ota_post)
     app.router.add_get("/mock/log", mock_log)
     app.router.add_post("/mock/clear", mock_clear)
     app.router.add_post("/mock/state", mock_state)
@@ -711,6 +822,7 @@ async def main():
     ap.add_argument("--speed", type=float, default=1.0, help="multiplier for simulated typing time")
     ap.add_argument("--scan-secs", type=float, default=1.5)
     ap.add_argument("--reboot-secs", type=float, default=3.0)
+    ap.add_argument("--ota-rate", type=float, default=250000, help="simulated firmware upload speed in bytes/s (0 = unlimited)")
     args = ap.parse_args()
     if args.port < 1024:
         sys.exit("use a high port")

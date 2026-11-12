@@ -153,6 +153,7 @@ legend{font-weight:600;padding:0 4px}
 .scan li:hover{background:var(--key)}
 .scan li span:first-child{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .scan:empty{display:none}
+input[type=file]{flex:1;min-width:12em;max-width:100%}
 dl{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:0;font-size:13px}
 dt{color:var(--mut)}dd{margin:0;overflow-wrap:anywhere}
 @media (max-width:600px){
@@ -292,6 +293,13 @@ dt{color:var(--mut)}dd{margin:0;overflow-wrap:anywhere}
   <dl id="info"></dl>
   <div class="row" style="margin-top:10px"><button id="bReboot" class="btn">重启设备</button><button id="bForget" class="btn">清除本机保存的令牌</button></div>
  </fieldset>
+ <fieldset id="fsOta"><legend>固件更新 <small>WiFi、令牌等设置会保留</small></legend>
+  <div class="row"><input type="file" id="otaFile" accept=".bin,application/octet-stream" aria-label="固件文件"><button type="button" id="bOtaX" class="btn" hidden>取消</button><button type="button" id="bOta" class="btn pri" disabled>上传并更新</button></div>
+  <div id="otaInfo" class="msg"></div>
+  <div id="otaProg" class="prog" hidden><i></i></div>
+  <div id="otaMsg" class="msg"></div>
+  <p class="hint">选择编译生成的 <code>firmware.bin</code>（在 <code>.pio/build/esp32-s3-devkitc-1/</code> 下）。设备收完后校验固件并自动重启，全程约半分钟，期间请勿断电。新固件无法正常启动时，设备会自动回到当前固件。</p>
+ </fieldset>
 </div></div>
 
 <div id="ovTok" class="ov" hidden><form id="fTok" class="sheet sm" role="dialog" aria-modal="true" aria-labelledby="tokH">
@@ -365,7 +373,8 @@ var ERR = {
   busy: '设备任务队列已满，请稍后再试',
   usb_not_ready: '目标电脑没有识别到 USB（未插好或已关机），操作未执行',
   usb_suspended: '目标电脑处于休眠状态且不允许远程唤醒，请先唤醒目标电脑',
-  timeout: '目标电脑超过 1 秒没有接收按键报告，任务失败'
+  timeout: '目标电脑超过 1 秒没有接收按键报告，任务失败',
+  internal: '设备内部错误'
 };
 function errText(code, message, extra) {
   var s = ERR[code] || (code && code.indexOf('http_') === 0 ? '设备返回 HTTP ' + code.slice(5) : '错误：' + code);
@@ -446,7 +455,7 @@ function api(method, path, body, timeout) {
 
 /* ---------- WebSocket ---------- */
 var ws = null, wsOpenFlag = false, retryAt = 0, retryTimer = 0, backoff = 0, failCount = 0, waitingToken = false;
-var lastRx = 0, lastPing = 0, rtt = null, st = null, rebootAt = 0, connState = 'init';
+var lastRx = 0, lastPing = 0, rtt = null, st = null, stAt = 0, rebootAt = 0, connState = 'init';
 function wsOpen() { return !!ws && wsOpenFlag && ws.readyState === 1; }
 function wsSend(obj, quiet) {
   if (!wsOpen()) { if (!quiet) note('未连接设备，操作未发送', 'warn', 'offline'); return false; }
@@ -589,7 +598,7 @@ setInterval(function () {
   var t = now();
   if (wsOpen()) {
     if (t - lastPing >= (holding() ? 180 : 1000)) sendPing();
-    if (t - lastRx > 5000) { note('设备无响应，正在重连', 'warn', 'lost'); dropWs(); }
+    if (t - lastRx > (ota.busy ? 30000 : 5000)) { note('设备无响应，正在重连', 'warn', 'lost'); dropWs(); }
   } else if (connState === 'retry' && retryAt) renderConn();
 }, 50);
 
@@ -598,7 +607,7 @@ var setupShown = false;
 function pill(el, cls, txt) { el.className = 'pill ' + cls; el.lastChild.textContent = txt; }
 function applyStatus(s) {
   if (!s || !s.usb) return;
-  st = s;
+  st = s; stAt = now();
   var u = s.usb, w = s.wifi || {}, h = s.hid || {};
   if (!u.mounted) pill($('pUsb'), 'bad', 'USB 未连接');
   else if (u.suspended) pill($('pUsb'), 'warn', 'USB 已挂起（休眠）');
@@ -626,6 +635,7 @@ function applyStatus(s) {
     if (!setupShown && !w.ssid && !store.get('setupSeen', false)) { setupShown = true; store.set('setupSeen', true); openSettings('wifi'); }
   } else banner('setup');
   if (s.ws_clients > 1) $('pConn').title = '共有 ' + s.ws_clients + ' 个客户端连接到设备';
+  otaStatus(s);
   capUI();
   if (!$('ovSet').hidden) fillInfo();
 }
@@ -1151,15 +1161,144 @@ function fillInfo() {
   var dl = $('info'); dl.textContent = '';
   if (!st) { dl.textContent = '暂无数据'; return; }
   var d = st.device || {}, w = st.wifi || {}, u = st.usb || {}, h = st.hid || {};
-  [['固件版本', (d.version || '?') + '（接口 ' + d.api + '）'], ['运行时间', fmtDur(d.uptime_ms || 0)], ['重启原因', d.reset_reason],
+  [['固件版本', (d.version || '?') + '（接口 ' + d.api + '）' + (d.build ? ' · 构建于 ' + d.build : '')],
+   ['固件标识', d.sha256 ? d.sha256 + (d.partition ? ' · 分区 ' + d.partition : '') : null],
+   ['运行时间', fmtDur(d.uptime_ms || 0)], ['重启原因', d.reset_reason],
    ['内存', Math.round((d.heap_free || 0) / 1024) + ' KB 空闲，最低 ' + Math.round((d.heap_min || 0) / 1024) + ' KB'],
    ['WiFi', w.sta_connected ? (w.ssid + ' · ' + w.ip + ' · ' + w.rssi + ' dBm') : '未连接'],
    ['热点', w.ap_active ? (w.ap_ssid + ' · ' + w.ap_ip) : '关闭'], ['主机名', (w.hostname || '') + '.local'],
    ['USB', (u.mounted ? '已连接' : '未连接') + (u.suspended ? '，已挂起' : '') + ' · 键盘 ' + u.kbd_protocol + ' / 鼠标 ' + u.mouse_protocol + ' · 远程唤醒' + (u.remote_wakeup ? '允许' : '不允许')],
    ['任务', '完成 ' + h.jobs_done + '，失败 ' + h.jobs_failed + '，报告 ' + h.reports_sent], ['客户端', st.ws_clients + ' 个'],
    ['鉴权', st.auth_required ? '已启用访问令牌' : '未启用（不安全）']
-  ].forEach(function (r) { var t = document.createElement('dt'), v = document.createElement('dd'); t.textContent = r[0]; v.textContent = r[1] == null ? '' : r[1]; dl.appendChild(t); dl.appendChild(v); });
+  ].forEach(function (r) { if (r[1] === null) return; var t = document.createElement('dt'), v = document.createElement('dd'); t.textContent = r[0]; v.textContent = r[1] == null ? '' : r[1]; dl.appendChild(t); dl.appendChild(v); });
 }
+
+/* ---------- firmware update (OTA, docs/API.md section 11) ---------- */
+// ota.after: set once an upload succeeded, until the rebooted device has reported which firmware it runs
+// (up = the device's uptime at local time t: a status with less uptime than that implies is from after the reboot)
+var ota = { file: null, head: null, busy: false, xhr: null, sent: 0, seen: false, after: null }, fwSha = null;
+function fmtSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : Math.round(n / 1024) + ' KB'; }
+function otaMsg(t, cls) { var m = $('otaMsg'); m.textContent = t || ''; m.className = 'msg ' + (cls || ''); }
+function otaBar(frac) { $('otaProg').hidden = frac == null; if (frac != null) $('otaProg').firstChild.style.width = Math.round(frac * 100) + '%'; }
+function otaUI() {
+  $('bOta').disabled = ota.busy || !ota.file || !!ota.after;
+  $('otaFile').disabled = ota.busy || !!ota.after;
+  $('bOtaX').hidden = !ota.xhr;
+}
+// start of an ESP-IDF app image: image header (24 bytes), segment header (8), application descriptor (256)
+function parseImage(buf) {
+  var u = new Uint8Array(buf), dv = new DataView(buf), i;
+  function str(off, len) { var s = ''; for (var j = off; j < off + len && u[j]; j++) s += String.fromCharCode(u[j]); return s; }
+  if (u.length < 288 || u[0] !== 0xE9 || dv.getUint32(32, true) !== 0xABCD5432) return { err: '这不是固件文件：请选择编译生成的 firmware.bin' };
+  var h = { chip: dv.getUint16(12, true), version: str(48, 32), project: str(80, 32), time: str(112, 16), date: str(128, 16), sha: '' };
+  for (i = 0; i < 8; i++) h.sha += (u[176 + i] < 16 ? '0' : '') + u[176 + i].toString(16);
+  if (h.chip !== 9) return { err: '这个固件不是为 ESP32-S3 编译的' };
+  if (h.project !== 'espkb') return { err: '这不是 ESPKB 的固件（项目名“' + h.project + '”）' };
+  return h;
+}
+$('otaFile').onchange = function () {
+  var f = $('otaFile').files[0];
+  ota.file = ota.head = null; $('otaInfo').textContent = ''; otaMsg(''); otaUI();
+  if (!f) return;
+  var r = new FileReader();
+  r.onerror = function () { otaMsg('无法读取所选文件', 'err'); };
+  r.onload = function () {
+    if ($('otaFile').files[0] !== f) return;
+    var h = parseImage(r.result);
+    if (h.err) { otaMsg(h.err, 'err'); return; }
+    ota.file = f; ota.head = h;
+    var same = st && st.device && st.device.sha256 === h.sha;
+    $('otaInfo').textContent = '所选固件：' + h.version + ' · 构建于 ' + h.date + ' ' + h.time + ' · ' + fmtSize(f.size) + (same ? '（与设备正在运行的固件相同）' : '');
+    otaUI();
+  };
+  r.readAsArrayBuffer(f.slice(0, 288));
+};
+// Progress of this page's upload. What the browser has handed to the network runs ahead of what the
+// device has written, so the device's own count (status pushes) is shown whenever the WebSocket is up.
+function otaProgress() {
+  if (!ota.xhr) return;
+  var size = ota.file.size, o = (st && st.ota) || {}, got = ota.sent;
+  if (wsOpen()) {
+    if (o.state === 'receiving') ota.seen = true;
+    got = !ota.seen ? 0 : o.state === 'receiving' ? Math.min(o.received, size) : size;
+  }
+  otaBar(got / size);
+  otaMsg(got < size ? '正在上传… ' + Math.floor(100 * got / size) + '%（' + fmtSize(got) + ' / ' + fmtSize(size) + '）' : '上传完成，设备正在校验固件…');
+}
+function otaFail(msg) {
+  ota.busy = false; ota.xhr = null; otaBar(null); otaUI();
+  otaMsg('更新失败：' + msg + '。设备仍在运行原固件。', 'err'); note('固件更新失败：' + msg, 'error');
+}
+function otaUpload() {
+  return new Promise(function (resolve, reject) {
+    var x = new XMLHttpRequest(), f = ota.file;
+    function fail(m) { var e = new Error(m); e.code = 'network'; reject(e); }
+    ota.xhr = x; ota.sent = 0; ota.seen = false; otaUI(); otaProgress();
+    x.open('POST', '/api/ota');
+    if (token) x.setRequestHeader('Authorization', 'Bearer ' + token);
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.upload.onprogress = function (e) { ota.sent = e.loaded; otaProgress(); };
+    x.onload = function () {
+      var j = null; try { j = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status === 200 && j && j.ok) { resolve(j); return; }
+      var code = (j && j.error) || ('http_' + x.status), er = new Error(errText(code, j && j.message, j));
+      er.code = code; reject(er);
+    };
+    x.onerror = function () { fail('上传中断，与设备的连接断开'); };
+    x.onabort = function () { fail('已取消'); };
+    x.send(f);
+  });
+}
+$('bOta').onclick = function () {
+  if (ota.busy || ota.after || !ota.file) return;
+  var h = ota.head, cur = st && st.device || {};
+  if (!confirm('把设备固件' + (cur.version ? '从 ' + cur.version + ' ' : '') + '更新为 ' + h.version + '（构建于 ' + h.date + ' ' + h.time + '）？\n\n设备上正在执行的任务会中断，更新后设备自动重启。WiFi、令牌等设置会保留。')) return;
+  ota.busy = true; otaUI(); otaMsg('正在检查设备…');
+  api('GET', '/api/ota').then(function (info) {
+    var up = info.update || {}, er;
+    if (up.state === 'receiving' || up.state === 'verifying') er = '设备正在进行另一次固件更新';
+    else if (!info.next) er = '设备的分区表不支持在线更新，请先用串口烧录一次固件';
+    else if (ota.file.size > info.next.size) er = '固件（' + fmtSize(ota.file.size) + '）超过设备固件分区的大小（' + fmtSize(info.next.size) + '）';
+    if (er) throw new Error(er);
+    return otaUpload();
+  }).then(function (r) {
+    ota.busy = false; ota.xhr = null; otaBar(null);
+    cur = st && st.device || cur;
+    if (!r.reboot) { otaMsg('固件 ' + r.version + ' 已写入并校验通过，重启设备后生效', 'ok'); otaUI(); return; }
+    ota.after = { sha: h.sha, from: cur.version, up: cur.uptime_ms || 0, t: stAt }; otaUI();
+    otaMsg('固件 ' + r.version + ' 已写入并校验通过，设备正在重启…', 'ok');
+    rebootAt = now();
+    banner('reboot2', 'info', '固件已写入，设备正在重启，稍后自动重新连接…');
+  }, function (e) { otaFail(e.message); });
+};
+$('bOtaX').onclick = function () { if (ota.xhr) ota.xhr.abort(); };
+window.addEventListener('beforeunload', function (e) { if (ota.busy) { e.preventDefault(); e.returnValue = ''; } });
+function otaReload() { location.reload(); }
+// called for every status: progress of an update (also one started elsewhere), and what runs after the reboot
+function otaStatus(s) {
+  var d = s.device || {}, o = s.ota || {}, a = ota.after;
+  if (o.state === 'receiving' || o.state === 'verifying') {
+    banner('otaRun', 'info', '设备正在更新固件' + (o.state === 'verifying' ? '：校验中…' : o.total ? '：已接收 ' + Math.floor(100 * o.received / o.total) + '%' : '') + '，期间请勿断电。');
+  } else banner('otaRun');
+  otaProgress();
+  if (a && d.uptime_ms < a.up + (now() - a.t) - 1500) {   // the uptime went back: this status is from after the reboot
+    ota.after = null; otaUI();
+    if (d.sha256 === a.sha) {
+      var ok = '固件更新成功：' + (a.from && a.from !== d.version ? a.from + ' → ' : '') + d.version;
+      otaMsg(ok, 'ok'); fwSha = d.sha256;
+      // the page is part of the firmware: load the new one (unless there is unsent text to lose)
+      if (txt.value) { note(ok, 'ok'); banner('fw', 'info', ok + '。网页也已随固件更新，请刷新页面。', '刷新页面', otaReload); closeSettings(); }
+      else { store.set('otaNote', ok); setTimeout(otaReload, 600); }
+    } else {
+      var bad = '设备重启后运行的不是刚上传的固件（当前 ' + d.version + '）：新固件可能无法正常启动，设备已自动回到原固件';
+      otaMsg(bad, 'err'); note(bad, 'error'); banner('fw', 'bad', bad);
+    }
+  } else if (!a && d.sha256) {
+    if (fwSha && fwSha !== d.sha256) banner('fw', 'info', '设备固件已更新为 ' + d.version + '，请刷新页面以加载新版网页。', '刷新页面', otaReload);
+    else if (!fwSha) fwSha = d.sha256;
+  }
+}
+(function () { var n = store.get('otaNote', ''); if (n) { store.set('otaNote', ''); note(n, 'ok'); } })();
 
 /* ---------- never leave a key stuck ---------- */
 window.addEventListener('blur', releaseAll);

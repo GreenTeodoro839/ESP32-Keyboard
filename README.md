@@ -1,6 +1,6 @@
 # ESPKB：WiFi 控制的 USB 键盘 + 鼠标
 
-ESPKB 是一块 ESP32-S3（N16R8）上的固件：它通过 WiFi 接收指令（HTTP + WebSocket），在 USB 口上表现为一个标准 USB 键盘 + 相对鼠标（VID:PID `303a:4004`）。
+ESPKB 是一块 ESP32-S3（N16R8）上的固件：它通过 WiFi 接收指令（HTTP + WebSocket），在 USB 口上表现为一个标准 USB 键盘 + 鼠标（相对移动和绝对定位，VID:PID `303a:4004`）。
 适合给不方便插键盘鼠标的机器打字、按组合键、移动/点击鼠标，可以用网页操作，也可以由脚本或 AI agent 调用。
 
 完整接口说明见 [`docs/API.md`](docs/API.md)，本文只讲怎么用。
@@ -35,6 +35,16 @@ monitor_port = /dev/serial/by-id/<你的串口>
 
 硬件参数按 N16R8（16 MB Flash + 8 MB Octal PSRAM）写在 `platformio.ini` 和 `sdkconfig.defaults` 里，其它型号需要相应修改。
 
+串口烧录不会清除设备上的配置（WiFi、令牌等），以后的版本可以直接通过 WiFi 更新，见下面的[固件更新](#固件更新ota)。
+不要用 `pio run -t erase`：它会擦除整片 Flash，包括配置。
+
+### 从 1.0.0 升级
+
+1.1.0 改了分区表（两个固件分区，用于 OTA），所以**第一次**必须用串口烧录：`pio run -t upload`。
+配置分区的位置没有变，WiFi 等设置会保留，烧录后设备照常联网。之后的更新就可以走 WiFi 了。
+如果项目目录里有 1.0.0 时生成的 `sdkconfig.esp32-s3-devkitc-1`，先把它删掉再编译（它是自动生成的文件，会按 `sdkconfig.defaults` 重新生成），
+否则新增的配置项不生效，编译会报错提示这一点。
+
 ## 首次配网
 
 设备还没有 WiFi 配置时（或连续 20 s 连不上路由器时），会开启配网热点 `ESPKB-XXXX`（密码 `espkb1234`），
@@ -60,8 +70,8 @@ monitor_port = /dev/serial/by-id/<你的串口>
 浏览器打开 `http://espkb.local/`：点击“键鼠捕获”区域后，键盘和鼠标操作会转发到被控电脑；
 也可以用屏幕按键、组合键、触控板，或在“发送文本”里粘贴文字发送。顶部“急停”会中止所有任务并松开所有键。
 
-> 注意：网页目前只在模拟设备（`web/dev/mock_server.py`）上测试过，尚未在真实设备上用浏览器验证；
-> 已确认的只是设备 `GET /` 返回的就是当前的 `web/index.html`（gzip 压缩）。
+> 注意：网页的键鼠控制部分目前只在模拟设备（`web/dev/mock_server.py`）上测试过，尚未在真实的被控电脑上验证。
+> 在真实设备上用浏览器（无头 Chrome）验证过的是：页面加载、状态显示、设置对话框和固件更新。
 
 ### curl
 
@@ -71,6 +81,7 @@ curl -s $H/api/status                                              # 设备状�
 curl -s -H "$J" -d '{"text":"echo hello\n"}' $H/api/type           # 打字（\n = 回车）
 curl -s -H "$J" -d '{"key":"ctrl+alt+t"}'    $H/api/key            # 组合键
 curl -s -H "$J" -d '{"move":[120,-40]}'      $H/api/mouse          # 鼠标相对移动
+curl -s -H "$J" -d '{"move_to":[960,540],"screen":[1920,1080]}' $H/api/mouse   # 鼠标绝对定位（像素）
 curl -s -H "$J" -d '{"click":"left"}'        $H/api/mouse          # 左键单击
 curl -s -H "$J" -d '{"steps":[{"key":"gui+r"},{"delay":400},{"text":"notepad\n"}]}' $H/api/seq   # 多步
 curl -s -X POST $H/api/release                                     # 急停
@@ -86,10 +97,25 @@ python3 tools/espkb.py status
 python3 tools/espkb.py type 'echo hello' --enter
 python3 tools/espkb.py key ctrl+alt+t
 python3 tools/espkb.py move 120 -40 ; python3 tools/espkb.py click
+python3 tools/espkb.py moveto 960 540 --screen 1920x1080   # 绝对定位；不带 --screen 时坐标为 0–32767
 python3 tools/espkb.py seq '[{"key":"gui+r"},{"delay":400},{"text":"notepad\n"}]'
 python3 tools/espkb.py release         # 急停
 python3 tools/espkb.py --help          # 全部命令和 step 格式
 ```
+
+### 固件更新（OTA）
+
+编译出新固件（`pio run`）后不用再接串口，通过 WiFi 就能更新，**WiFi、令牌、主机名等配置都会保留**：
+
+- **网页**：“设置” → “固件更新”，选择 `.pio/build/esp32-s3-devkitc-1/firmware.bin`，点“上传并更新”。
+  页面显示进度，设备校验固件后自动重启，页面重新连上后报告结果。整个过程约半分钟。
+- **命令行**：`python3 tools/espkb.py ota .pio/build/esp32-s3-devkitc-1/firmware.bin`（会等设备重启并确认它运行的是新固件；
+  `espkb.py ota` 不带文件则显示当前固件信息）。
+- **curl**：`curl -H 'Content-Type: application/octet-stream' --data-binary @.pio/build/esp32-s3-devkitc-1/firmware.bin $H/api/ota`
+
+设备有两个固件分区，新固件写在没在运行的那个里，写完校验通过才切换，所以上传中断、文件损坏、传错文件都不会影响正在运行的固件。
+新固件启动后如果崩溃，或者 2 分钟内连不上网络（也开不了配网热点），设备会自动回到更新前的固件。
+更新期间不要断电。设置了访问令牌时，更新同样需要令牌。细节见 [`docs/API.md`](docs/API.md) §11。
 
 ### 给脚本 / AI agent 的要点
 
@@ -109,9 +135,13 @@ python3 tools/espkb.py --help          # 全部命令和 step 格式
 ## 已知限制
 
 - 只支持 US 键盘布局的 ASCII 文本，不能直接输入中文。
+- 绝对定位（`move_to`）用的是第 3 个 USB 接口，BIOS 等只认 boot 协议的环境里不起作用；多显示器时对应哪块屏幕由被控系统决定。
+  从 1.1.0 升级上来后 USB 设备描述变了（多了一个接口），被控电脑会把它当作新设备重新识别一次。
 - 在大量 WebSocket 客户端频繁断开重连的压力下，偶尔会有新建的 HTTP/WebSocket 连接被立即断开（ESP-IDF HTTP 服务器的延迟关闭机制相关），客户端重试即可。
+- 大量短连接（测试套件、脚本高频调用）下，偶发新建连接在 10 s 后超时：设备 TIME_WAIT 中的旧四元组与客户端复用的源端口冲突，客户端重试即可恢复。定位记录和候选修复见 [`docs/known-issues.md`](docs/known-issues.md)。
 - 一次同步发送接近 64 KB 的文本（约 2 分钟）时，连接可能在等待结果期间被重置；长文本请分段发送。
-- **尚未验证**：网页在真实设备上的表现；在真实被控电脑（Windows / macOS / Linux 桌面、BIOS）上的实际效果；主机挂起后的远程唤醒；BOOT 键恢复出厂；通过配网热点完成配网。目前的验证都是用 libusb 假主机在 USB 报告层面做的。
+- **尚未验证**：网页在真实设备上的表现；在真实被控电脑（Windows / macOS / Linux 桌面、BIOS）上的实际效果（例外：绝对定位在
+  Linux X11 桌面 1920×1080 上实测过，像素级准确）；主机挂起后的远程唤醒；BOOT 键恢复出厂；通过配网热点完成配网。目前的验证都是用 libusb 假主机在 USB 报告层面做的。
 - 设备不会处理客户端的 `Connection: close`：读响应时请按 `Content-Length`，不要等连接关闭（curl、Python requests 等常用客户端都没有问题）。
 
 ## 运行测试
@@ -120,7 +150,8 @@ python3 tools/espkb.py --help          # 全部命令和 step 格式
 python3 -m venv .venv && .venv/bin/pip install -r tools/requirements.txt   # 首次
 .venv/bin/python -m pytest tests/offline   # 不需要硬件
 .venv/bin/python -m pytest tests           # 默认硬件测试（需要设备在线）
-.venv/bin/python -m pytest tests -m ""     # 全部，包括 slow / wifi / reboot / serial
+.venv/bin/python -m pytest tests -m ""     # 全部，包括 slow / wifi / reboot / serial / ota
+.venv/bin/python -m pytest tests/test_ota.py -m ota   # 固件更新测试：真的刷写并重启设备（约 2 分钟），不需要 USB 测试台
 ```
 
 设备地址来自环境变量 `ESPKB_HOST` 或 `tests/device.env`（`ESPKB_HOST=...`）；测试台参数在 `tests/testbed.env`（从 `tests/testbed.env.example` 复制后修改）。详见 [`tests/README.md`](tests/README.md)。

@@ -10,6 +10,8 @@ Run everything from the project root with the project venv (`.venv/bin/python`).
 .venv/bin/python -m pytest tests -m slow        # only the long tests
 .venv/bin/python -m pytest tests -m "wifi"      # hotspot down/up tests
 .venv/bin/python -m pytest tests -m "reboot or serial"
+.venv/bin/python -m pytest tests/test_ota.py           # firmware update checks that never write flash
+.venv/bin/python -m pytest tests/test_ota.py -m ota    # real firmware updates over WiFi (about 2 minutes)
 .venv/bin/python -m pytest tests -m ""          # everything
 .venv/bin/python -m pytest tests/test_typing.py -k capslock -v
 ```
@@ -25,18 +27,30 @@ token configured, set `ESPKB_TOKEN`: it is cleared for the run and restored afte
 | `wifi` | takes the test hotspot down and up (`nmcli connection down/up espkb-test`) | excluded |
 | `reboot` | reboots or resets the device | excluded |
 | `serial` | uses the debug serial console | excluded |
+| `ota` | uploads a firmware image, writes it to flash and usually reboots into it | excluded |
+| `no_hid` | needs the device on the network only, not the USB HID harness (`tests/test_ota.py`) | included |
 | `hw` | needs the device (added automatically outside `tests/offline`) | included |
 
 Other knobs: `ESPKB_TIMING_TOL_MS` (timing tolerance, default 4), `ESPKB_HID_MODE=sync` (fallback
 USB reader), `ESPKB_HID_FIND_TIMEOUT` (seconds, default 15), `ESPKB_ALLOW_FACTORY_RESET=1`
 (enables the factory-reset test).
 
+`tests/test_ota.py` uploads `$ESPKB_OTA_IMAGE`, or the last build (`.pio/build/esp32-s3-devkitc-1/firmware.bin`).
+Build the firmware the device should end up with before running `-m ota`: every real update leaves the
+device running that image. These tests never make the device emit keys, so they do not need the native
+USB port on this machine and skip the clean-state fixture; they restore what they change (`key_delay_ms`,
+the token) themselves.
+
+A rare connection timeout after sustained short-connection churn is a known device-side TIME_WAIT
+issue, not a test bug: rerun the affected test. Details and candidate fixes are in
+[`../docs/known-issues.md`](../docs/known-issues.md).
+
 ## Safety model
 
 * **HID isolation.** The device's HID port is plugged into this machine's live desktop. A udev rule
-  unbinds `usbhid` from `303a:4004`; the harness (`tools/hidhost.py`) then claims both HID interfaces
+  unbinds `usbhid` from `303a:4004`; the harness (`tools/hidhost.py`) then claims all three HID interfaces
   over libusb and acts as the USB host. Before anything can emit HID output it verifies in sysfs that
-  both interfaces are bound to `usbfs` (claimed by the harness), never `usbhid`. It detaches a kernel
+  all three interfaces (keyboard, mouse, absolute mouse) are bound to `usbfs` (claimed by the harness), never `usbhid`. It detaches a kernel
   driver via libusb if one is somehow active and never re-attaches one. If isolation cannot be
   established, the whole run stops (`REFUSING TO RUN ...`). Every POST and WebSocket send goes through
   a guard that re-checks isolation. Requests that could press Power (0x66) or Alt+PrintScreen are

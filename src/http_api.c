@@ -10,6 +10,7 @@
 #include "http_sync.h"
 #include "http_util.h"
 #include "keymap.h"
+#include "ota.h"
 #include "status.h"
 #include "steps.h"
 #include "usb_hid.h"
@@ -68,7 +69,7 @@ static bool has_any(const cJSON *o, const char *const *names, int n)
 
 static job_t *parse_action(endpoint_t ep, cJSON *root, const keysim_t *sim, parse_err_t *pe)
 {
-    static const char *const mouse_verbs[] = {"move", "click", "button", "scroll"};
+    static const char *const mouse_verbs[] = {"move", "move_to", "click", "button", "scroll"};
     static const char *const key_verb[] = {"key"};
     static const char *const text_verb[] = {"text"};
     if (ep == EP_SEQ) {
@@ -94,12 +95,12 @@ static job_t *parse_action(endpoint_t ep, cJSON *root, const keysim_t *sim, pars
         return NULL;
     }
     const char *const *verbs = ep == EP_TYPE ? text_verb : ep == EP_KEY ? key_verb : mouse_verbs;
-    int nverbs = ep == EP_MOUSE ? 4 : 1;
+    int nverbs = ep == EP_MOUSE ? (int)(sizeof(mouse_verbs) / sizeof(mouse_verbs[0])) : 1;
     if (!has_any(root, verbs, nverbs)) {
         pe->err = EK_BAD_REQUEST;
         snprintf(pe->msg, sizeof(pe->msg), ep == EP_TYPE ? "missing field \"text\""
                  : ep == EP_KEY ? "missing field \"key\""
-                 : "missing field: one of move, click, button, scroll");
+                 : "missing field: one of move, move_to, click, button, scroll");
         return NULL;
     }
     uint32_t mask = ep == EP_TYPE ? STEP_MASK(STEP_TEXT) : ep == EP_KEY ? STEP_MASK(STEP_KEY) : STEP_MASK_MOUSE;
@@ -260,7 +261,7 @@ static esp_err_t h_keys(httpd_req_t *req)
 static const char API_DESC[] =
     "{\"ok\":true,\"name\":\"" ESPKB_NAME "\",\"api\":1,\"version\":\"" ESPKB_FW_VERSION "\","
     "\"notes\":["
-    "\"Bodies are JSON (Content-Type: application/json), max 65536 bytes; responses are JSON.\","
+    "\"Bodies are JSON (Content-Type: application/json), max 65536 bytes (POST /api/ota takes a raw image instead); responses are JSON.\","
     "\"Action endpoints are synchronous (reply when the job has run: {ok,job,elapsed_ms}); add ?async=1 to reply at once ({ok,job,queued}).\","
     "\"Errors: {ok:false,error,message[,index][,offset]}. Validation is atomic: an invalid step rejects the whole request.\","
     "\"If a token is configured send it as 'Authorization: Bearer <t>', 'X-Token: <t>' or ?token=<t> (WebSocket: ?token=).\","
@@ -269,7 +270,7 @@ static const char API_DESC[] =
     "\"endpoints\":["
     "{\"method\":\"POST\",\"path\":\"/api/type\",\"desc\":\"Type text: {\\\"text\\\":\\\"...\\\",\\\"delay_ms\\\":5} or a text/plain body\"},"
     "{\"method\":\"POST\",\"path\":\"/api/key\",\"desc\":\"One key step: tap/down/up a key or combo, e.g. {\\\"key\\\":\\\"ctrl+alt+t\\\"}\"},"
-    "{\"method\":\"POST\",\"path\":\"/api/mouse\",\"desc\":\"One mouse step: move, click, button or scroll, e.g. {\\\"move\\\":[120,-40]}\"},"
+    "{\"method\":\"POST\",\"path\":\"/api/mouse\",\"desc\":\"One mouse step: move, move_to, click, button or scroll, e.g. {\\\"move\\\":[120,-40]}\"},"
     "{\"method\":\"POST\",\"path\":\"/api/seq\",\"desc\":\"Several steps in order: {\\\"steps\\\":[...]} or a bare array, max 512 steps\"},"
     "{\"method\":\"POST\",\"path\":\"/api/release\",\"desc\":\"Emergency stop: abort the running job, flush the queue, release all keys and buttons\"},"
     "{\"method\":\"POST\",\"path\":\"/api/wake\",\"desc\":\"Send USB remote wakeup if the host is suspended\"},"
@@ -280,6 +281,8 @@ static const char API_DESC[] =
     "{\"method\":\"POST\",\"path\":\"/api/config\",\"desc\":\"Partial config update: hostname, wifi_ssid, wifi_password, ap_password, token, key_delay_ms\"},"
     "{\"method\":\"GET\",\"path\":\"/api/wifi/scan\",\"desc\":\"Scan for WiFi networks (takes about 3 s)\"},"
     "{\"method\":\"POST\",\"path\":\"/api/reboot\",\"desc\":\"Reboot about 500 ms after replying\"},"
+    "{\"method\":\"GET\",\"path\":\"/api/ota\",\"desc\":\"Firmware update state: running image, free slot and its size, progress of an upload\"},"
+    "{\"method\":\"POST\",\"path\":\"/api/ota\",\"desc\":\"Firmware update: the raw app image (firmware.bin) as the body with Content-Length; it is verified, activated and the device reboots (?reboot=0: stay up). Settings are kept\"},"
     "{\"method\":\"GET\",\"path\":\"/ws\",\"desc\":\"WebSocket: send steps as JSON text frames (optional id for an ack), {\\\"ping\\\":x} keep-alive, {\\\"release\\\":true} emergency stop; receives status pushes\"},"
     "{\"method\":\"GET\",\"path\":\"/\",\"desc\":\"Web UI\"}],"
     "\"steps\":["
@@ -287,6 +290,7 @@ static const char API_DESC[] =
     "\"{\\\"key\\\":\\\"ctrl+alt+del\\\"} tap a key or combo (press in order, hold hold_ms, release in reverse); optional hold_ms, repeat (1-1000), delay_ms; key may be a name, a combo, a usage code 1-255 or \\\"0x28\\\"\","
     "\"{\\\"key\\\":\\\"shift\\\",\\\"action\\\":\\\"down\\\"} hold (down) or release (up) keys; optional ttl_ms (1-600000) for HTTP holds\","
     "\"{\\\"move\\\":[dx,dy]} relative mouse move, -32767..32767 per axis, split into straight-line reports; optional step (1-127, default 127), delay_ms (default 0)\","
+    "\"{\\\"move_to\\\":[x,y]} absolute mouse position, 0..32767 per axis = left/top..right/bottom of the screen; with \\\"screen\\\":[w,h] x,y are pixels (0..w-1, 0..h-1)\","
     "\"{\\\"click\\\":\\\"left\\\"} click left/right/middle/back/forward; optional count (1-100), hold_ms (default 20), interval_ms (default 60)\","
     "\"{\\\"button\\\":\\\"left\\\",\\\"action\\\":\\\"down\\\"} hold or release a mouse button (action required); optional ttl_ms\","
     "\"{\\\"scroll\\\":3} or {\\\"scroll\\\":[v,h]} wheel: v>0 up, h>0 right, -32767..32767\","
@@ -373,21 +377,34 @@ static esp_err_t h_scan(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---------- firmware update ---------- */
+
+static esp_err_t h_ota_get(httpd_req_t *req)
+{
+    CHECK_ACCESS(req);
+    cJSON *o = ok_obj();
+    if (o) {
+        ota_add_info(o);
+    }
+    return http_send_obj(req, EK_NONE, o);
+}
+
+static esp_err_t h_ota_post(httpd_req_t *req)
+{
+    /* The body is a whole firmware image: a refused request must not make the server read all of it. */
+    espkb_err_t e = http_access_check(req);
+    if (e) {
+        return http_reject(req, e, NULL);
+    }
+    return ota_handle_upload(req);
+}
+
 /* ---------- errors from the server itself ---------- */
 
-/* The server would purge an unread body after ESP_OK without any limit; a
- * large one is drained with a bound and the connection closed instead. */
 static esp_err_t err_reply(httpd_req_t *req, espkb_err_t err)
 {
     http_guard_reset(req);
-    if (req->content_len <= 4096) {
-        http_send_error(req, err, NULL, -1, -1, 0);
-        return ESP_OK;
-    }
-    httpd_resp_set_hdr(req, "Connection", "close");
-    http_send_error(req, err, NULL, -1, -1, 0);
-    http_drain_body(req);
-    return ESP_FAIL;
+    return http_reject(req, err, NULL);
 }
 
 static esp_err_t err_not_found(httpd_req_t *req, httpd_err_code_t code)
@@ -400,6 +417,21 @@ static esp_err_t err_method(httpd_req_t *req, httpd_err_code_t code)
 {
     (void)code;
     return err_reply(req, EK_METHOD_NOT_ALLOWED);
+}
+
+/* Reading a request timed out (after 700 ms, see the slow-client guard).
+ * The server hands a request with a body to its handler only once the first
+ * body byte is there, but a client that sent "Expect: 100-continue" (curl does
+ * for bodies over 1 MB, i.e. for firmware images) sends none until it is told
+ * to. So the go-ahead is given here; ESP_OK makes the server read on. The
+ * guard still drops a client that keeps stalling. */
+static esp_err_t err_timeout(httpd_req_t *req, httpd_err_code_t code)
+{
+    if (http_expect_continue(req)) {
+        return ESP_OK;
+    }
+    httpd_resp_send_err(req, code, NULL);
+    return ESP_FAIL;
 }
 
 static esp_err_t err_bad(httpd_req_t *req, httpd_err_code_t code)
@@ -434,6 +466,8 @@ static const route_t s_routes[] = {
     {"/api/release", HTTP_POST, h_release, NULL},
     {"/api/wake", HTTP_POST, h_wake, NULL},
     {"/api/reboot", HTTP_POST, h_reboot, NULL},
+    {"/api/ota", HTTP_GET, h_ota_get, NULL},
+    {"/api/ota", HTTP_POST, h_ota_post, NULL},
 };
 
 /* Every handler runs through here so the slow-client guard restarts its
@@ -498,6 +532,7 @@ void http_api_start(void)
 
     httpd_register_err_handler(hd, HTTPD_404_NOT_FOUND, err_not_found);
     httpd_register_err_handler(hd, HTTPD_405_METHOD_NOT_ALLOWED, err_method);
+    httpd_register_err_handler(hd, HTTPD_408_REQ_TIMEOUT, err_timeout);
     httpd_register_err_handler(hd, HTTPD_400_BAD_REQUEST, err_bad);
     httpd_register_err_handler(hd, HTTPD_411_LENGTH_REQUIRED, err_bad);
     httpd_register_err_handler(hd, HTTPD_414_URI_TOO_LONG, err_bad);

@@ -10,7 +10,7 @@ import sys
 import pytest
 
 import espkb
-from mock_device import MockDevice, STATUS
+from mock_device import MockDevice, STATUS, firmware_image
 
 TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools")
 ESPKB_PY = os.path.join(TOOLS, "espkb.py")
@@ -58,6 +58,8 @@ POST_CASES = [
     (["up", "shift"], "/api/key", {"key": "shift", "action": "up"}),
     (["move", "-10", "20"], "/api/mouse", {"move": [-10, 20]}),
     (["move", "300", "-5", "--step", "10", "--delay-ms", "2"], "/api/mouse", {"move": [300, -5], "step": 10, "delay_ms": 2}),
+    (["moveto", "960", "540", "--screen", "1920x1080"], "/api/mouse", {"move_to": [960, 540], "screen": [1920, 1080]}),
+    (["moveto", "0", "32767"], "/api/mouse", {"move_to": [0, 32767]}),
     (["click"], "/api/mouse", {"click": "left"}),
     (["click", "right", "--count", "2", "--hold-ms", "30", "--interval-ms", "100"], "/api/mouse",
      {"click": "right", "count": 2, "hold_ms": 30, "interval_ms": 100}),
@@ -102,7 +104,7 @@ def test_post_without_body(mock, args, path):
 
 @pytest.mark.parametrize("args,path", [(["status"], "/api/status"), (["info"], "/api"), (["keys"], "/api/keys"),
                                        (["config", "get"], "/api/config"), (["wifi-scan"], "/api/wifi/scan"),
-                                       (["wait-ready"], "/api/status")])
+                                       (["wait-ready"], "/api/status"), (["ota"], "/api/ota")])
 def test_get_commands(mock, args, path):
     r = cli(mock, *args)
     assert r.returncode == 0, r.stderr
@@ -264,6 +266,9 @@ def test_usage_errors_exit_2(mock):
     assert cli(mock, "nosuchcommand").returncode == 2
     assert cli(mock, "move", "1").returncode == 2
     assert cli(mock, "click", "sideways").returncode == 2
+    assert cli(mock, "moveto", "1").returncode == 2
+    for bad in ("1920", "1920x", "x1080", "0x1080", "axb"):
+        assert cli(mock, "moveto", "1", "1", "--screen", bad).returncode == 2, bad
     assert mock.requests == []
 
 
@@ -289,9 +294,128 @@ def test_help_texts():
     assert r.returncode == 0
     for word in ("ESPKB_HOST", "ESPKB_TOKEN", "exit codes", "release", "Step reference", "--json", "--async"):
         assert word in r.stdout
-    for sub in ("type", "key", "seq", "config", "wait-ready"):
+    for sub in ("type", "key", "seq", "config", "wait-ready", "ota"):
         r = subprocess.run([sys.executable, ESPKB_PY, sub, "--help"], capture_output=True, text=True)
         assert r.returncode == 0 and "--host" in r.stdout
+
+
+# ---------------------------------------------------------------------------
+# firmware update
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def fw(tmp_path):
+    p = tmp_path / "firmware.bin"
+    p.write_bytes(firmware_image(version="1.2.3"))
+    return p
+
+
+def test_ota_info_human(mock):
+    r = cli(mock, "ota")
+    assert r.returncode == 0, r.stderr
+    assert "running: 1.0.0" in r.stdout and "00c0ffee00c0ffee" in r.stdout and "ota_0" in r.stdout
+    assert "update slot: ota_1 (4194304 bytes)" in r.stdout and "last update: idle" in r.stdout
+
+
+def test_ota_upload_waits_for_the_new_firmware(mock, fw):
+    r = cli(mock, "ota", str(fw))
+    assert r.returncode == 0, r.stderr
+    assert "uploading espkb 1.2.3 (built Nov 12 2026 12:34:56, 4096 bytes)" in r.stdout
+    assert "updated: the device runs 1.2.3 (id a0a1a2a3a4a5a6a7, slot ota_1)" in r.stdout
+    posts = [q for q in mock.requests if q.method == "POST"]
+    assert len(posts) == 1 and posts[0].path == "/api/ota" and posts[0].query == {}
+    assert posts[0].body == fw.read_bytes(), "the image must be sent unchanged as the raw body"
+    assert posts[0].headers["content-type"] == "application/octet-stream"
+    assert posts[0].headers["content-length"] == "4096"
+    order = [(q.method, q.path) for q in mock.requests]
+    assert order.index(("GET", "/api/ota")) < order.index(("POST", "/api/ota")), "ask the device before uploading"
+    assert order[-1] == ("GET", "/api/status")
+
+
+def test_ota_rolled_back_firmware_is_an_error(mock, fw):
+    mock.ota_rollback = True
+    r = cli(mock, "ota", str(fw))
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "ota_failed" in r.stderr and "rolled back" in r.stderr and "a0a1a2a3a4a5a6a7" in r.stderr
+
+
+def test_ota_no_reboot_and_no_wait(mock, fw):
+    r = cli(mock, "ota", str(fw), "--no-reboot")
+    assert r.returncode == 0, r.stderr
+    assert mock.last().query == {"reboot": "0"} and "next reboot" in r.stdout
+    assert mock.status["device"]["version"] == "1.0.0"
+    mock.clear()
+    r = cli(mock, "ota", str(fw), "--no-wait", "--json")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"ok": True, "bytes": 4096, "partition": "ota_1", "version": "1.2.3", "reboot": True}
+    assert mock.last().path == "/api/ota" and mock.last().query == {}, "no status polling with --no-wait"
+
+
+def test_ota_sends_the_token(mock, fw):
+    r = cli(mock, "ota", str(fw), "--no-wait", "--token", "s3cret")
+    assert r.returncode == 0, r.stderr
+    assert all(q.headers.get("authorization") == "Bearer s3cret" for q in mock.requests)
+
+
+def test_ota_refuses_files_that_are_not_firmware(mock, tmp_path):
+    bad = tmp_path / "notes.txt"
+    bad.write_bytes(b"hello" * 200)
+    r = cli(mock, "ota", str(bad))
+    assert r.returncode == 2 and "not an ESP application image" in r.stderr
+    r = cli(mock, "ota", str(tmp_path / "missing.bin"))
+    assert r.returncode == 2 and "missing.bin" in r.stderr
+    r = cli(mock, "ota", "--no-reboot")
+    assert r.returncode == 2
+    assert not mock.requests, "nothing may be sent"
+
+
+def test_ota_preflight_errors(mock, fw):
+    """What the device would refuse is reported before the upload starts (a refused upload is cut
+    off in mid-transfer and would end as a connection error)."""
+    mock.error("GET", "/api/ota", 401, "unauthorized", "a valid token is required")
+    r = cli(mock, "ota", str(fw), "--no-wait")
+    assert r.returncode == 1 and "unauthorized (HTTP 401)" in r.stderr
+    mock.respond("GET", "/api/ota", payload={"ok": True, "running": {}, "next": {"partition": "ota_1", "size": 1000},
+                                            "update": {"state": "idle"}})
+    r = cli(mock, "ota", str(fw), "--no-wait")
+    assert r.returncode == 1 and "too_large" in r.stderr and "4096 bytes" in r.stderr
+    mock.respond("GET", "/api/ota", payload={"ok": True, "running": {}, "next": {"partition": "ota_1", "size": 4194304},
+                                            "update": {"state": "receiving", "received": 5, "total": 9}})
+    r = cli(mock, "ota", str(fw), "--no-wait")
+    assert r.returncode == 1 and "busy" in r.stderr
+    mock.respond("GET", "/api/ota", payload={"ok": True, "running": {}, "next": None, "update": {"state": "idle"}})
+    r = cli(mock, "ota", str(fw), "--no-wait")
+    assert r.returncode == 1 and "UART" in r.stderr
+    assert not [q for q in mock.requests if q.method == "POST"], "nothing may be uploaded"
+
+
+def test_ota_device_error(mock, fw):
+    mock.error("POST", "/api/ota", 400, "bad_request", "image verification failed (corrupt or incomplete file)")
+    r = cli(mock, "ota", str(fw))
+    assert r.returncode == 1 and "bad_request (HTTP 400): image verification failed" in r.stderr
+
+
+def test_parse_image():
+    head = espkb.parse_image(firmware_image(version="2.0.1", sha=bytes.fromhex("0123456789abcdef") + bytes(24)))
+    assert head == {"project": "espkb", "version": "2.0.1", "date": "Nov 12 2026", "time": "12:34:56",
+                    "idf": "6.1.0", "sha256": "0123456789abcdef", "chip_id": 9}
+    for bad in (b"", b"\xe9" * 100, bytes(288), b"\xe9" + bytes(287)):
+        with pytest.raises(ValueError):
+            espkb.parse_image(bad)
+
+
+def test_library_ota(mock, fw):
+    kb = espkb.ESPKB(mock.host, token="")
+    assert kb.ota_info()["next"]["partition"] == "ota_1"
+    res = kb.ota(str(fw), reboot=False)
+    assert res["reboot"] is False and mock.last().query == {"reboot": "0"}
+    st = kb.ota_and_wait(fw.read_bytes(), timeout=20)
+    assert st["device"]["sha256"] == "a0a1a2a3a4a5a6a7" and st["device"]["version"] == "1.2.3"
+    mock.ota_rollback = True
+    mock.status["device"].update(uptime_ms=500000, sha256="00c0ffee00c0ffee")
+    with pytest.raises(espkb.ESPKBError) as ei:
+        kb.ota_and_wait(fw.read_bytes(), timeout=20)
+    assert ei.value.code == "ota_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +431,8 @@ def test_library_calls(mock):
     kb.key_down("shift", ttl_ms=100)
     kb.key_up("shift")
     kb.move(1, -2, step=5)
+    kb.move_to(10, 20)
+    kb.move_to(10, 20, screen=(1920, 1080))
     kb.click("right", count=2)
     kb.button_down("left")
     kb.button_up("left")
@@ -323,6 +449,8 @@ def test_library_calls(mock):
     assert kb.wifi_scan()["aps"]
     bodies = [(r.method, r.path, r.json) for r in mock.requests]
     assert ("POST", "/api/mouse", {"scroll": [-1, 2]}) in bodies
+    assert ("POST", "/api/mouse", {"move_to": [10, 20]}) in bodies
+    assert ("POST", "/api/mouse", {"move_to": [10, 20], "screen": [1920, 1080]}) in bodies
     assert ("POST", "/api/key", {"key": "shift", "action": "down", "ttl_ms": 100}) in bodies
     assert ("POST", "/api/config", {"key_delay_ms": 7}) in bodies
 
@@ -365,6 +493,7 @@ def test_estimate_ms_and_timeouts():
     assert espkb.estimate_ms([{"key": "a", "repeat": 1000}]) > 10000
     assert espkb.estimate_ms([{"move": [32767, 0], "step": 1}]) > 32767
     assert espkb.estimate_ms([{"bogus": 1}, "x", {"move": "bad"}]) == 0
+    assert 0 < espkb.estimate_ms([{"move_to": [1, 1]}]) < 100
 
 
 def test_sync_timeout_grows_with_job(mock):

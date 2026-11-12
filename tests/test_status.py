@@ -10,13 +10,14 @@ import support
 
 SCHEMA = {
     "device": {"name": str, "api": int, "version": str, "uptime_ms": int, "heap_free": int, "heap_min": int,
-               "reset_reason": str},
+               "reset_reason": str, "build": str, "sha256": str, "partition": str},
     "usb": {"mounted": bool, "suspended": bool, "remote_wakeup": bool, "leds": dict, "kbd_protocol": str,
             "mouse_protocol": str},
     "hid": {"busy": bool, "queued": int, "keys": list, "buttons": list, "reports_sent": int, "jobs_done": int,
             "jobs_failed": int},
     "wifi": {"sta_connected": bool, "ssid": str, "ip": str, "rssi": int, "ap_active": bool, "ap_ssid": str,
              "ap_ip": str, "hostname": str},
+    "ota": {"state": str, "received": int, "total": int},
 }
 
 
@@ -119,7 +120,7 @@ def test_api_self_description(dev):
     want = {("POST", "/api/type"), ("POST", "/api/key"), ("POST", "/api/mouse"), ("POST", "/api/seq"),
             ("POST", "/api/release"), ("POST", "/api/wake"), ("GET", "/api/status"), ("GET", "/api/keys"),
             ("GET", "/api"), ("GET", "/api/config"), ("POST", "/api/config"), ("GET", "/api/wifi/scan"),
-            ("POST", "/api/reboot")}
+            ("POST", "/api/reboot"), ("GET", "/api/ota"), ("POST", "/api/ota")}
     assert want <= eps, "missing endpoints: %s" % sorted(want - eps)
     assert isinstance(d["steps"], list) and len(d["steps"]) >= 9
     assert all(isinstance(s, str) and s for s in d["steps"])

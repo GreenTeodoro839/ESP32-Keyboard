@@ -14,6 +14,7 @@
 static const char *const s_verbs[STEP_TYPE_COUNT] = {
     [STEP_TEXT] = "text", [STEP_KEY] = "key", [STEP_MOVE] = "move", [STEP_CLICK] = "click",
     [STEP_BUTTON] = "button", [STEP_SCROLL] = "scroll", [STEP_DELAY] = "delay", [STEP_RELEASE] = "release",
+    [STEP_MOVE_TO] = "move_to",
 };
 
 job_t *job_alloc(size_t nsteps)
@@ -246,19 +247,31 @@ static bool parse_action(const cJSON *obj, bool required, bool allow_tap, int in
                                                         : "action must be \"down\" or \"up\"");
 }
 
-static bool parse_pair(const cJSON *v, int32_t *a, int32_t *b)
+/* A two-element array of integers, each within lo..MAX_COORD. */
+static bool parse_pair(const cJSON *v, long lo, int32_t *a, int32_t *b)
 {
     long x, y;
     if (!cJSON_IsArray(v) || cJSON_GetArraySize(v) != 2) {
         return false;
     }
-    if (!json_int(cJSON_GetArrayItem(v, 0), -MAX_COORD, MAX_COORD, &x) ||
-        !json_int(cJSON_GetArrayItem(v, 1), -MAX_COORD, MAX_COORD, &y)) {
+    if (!json_int(cJSON_GetArrayItem(v, 0), lo, MAX_COORD, &x) ||
+        !json_int(cJSON_GetArrayItem(v, 1), lo, MAX_COORD, &y)) {
         return false;
     }
     *a = (int32_t)x;
     *b = (int32_t)y;
     return true;
+}
+
+/* Pixel p of a screen that is n pixels wide (or high) -> absolute axis value.
+ * The axis 0..32767 spans the whole screen, so pixel p owns the values v with
+ * p <= v * n / 32768 < p + 1. Returns the one nearest to the pixel's centre. */
+static int32_t pixel_to_abs(int32_t p, int32_t n)
+{
+    const int64_t span = MAX_COORD + 1;
+    int64_t centre = ((int64_t)(2 * p + 1) * span) / (2 * n);
+    int64_t first = ((int64_t)p * span + n - 1) / n;
+    return (int32_t)(centre > first ? centre : first);
 }
 
 /* Parses and validates one step; sim tracks held keys for the 6-key rollover rule. */
@@ -278,7 +291,7 @@ static bool step_parse(const cJSON *obj, int index, uint32_t allowed, step_t *ou
     }
     if (nverbs != 1) {
         return fail(err, EK_BAD_STEP, index, -1, nverbs == 0
-                    ? "step has no verb (text, key, move, click, button, scroll, delay, release)"
+                    ? "step has no verb (text, key, move, move_to, click, button, scroll, delay, release)"
                     : "step must have exactly one verb");
     }
     if (!(allowed & STEP_MASK(type))) {
@@ -342,7 +355,7 @@ static bool step_parse(const cJSON *obj, int index, uint32_t allowed, step_t *ou
     }
 
     case STEP_MOVE:
-        if (!parse_pair(v, &out->a, &out->b)) {
+        if (!parse_pair(v, -MAX_COORD, &out->a, &out->b)) {
             return fail(err, EK_BAD_STEP, index, -1, "move must be [dx, dy] with integers in -32767..32767");
         }
         if (!opt_int(obj, "step", 1, 127, 127, &n, index, err)) {
@@ -392,10 +405,30 @@ static bool step_parse(const cJSON *obj, int index, uint32_t allowed, step_t *ou
             }
             out->a = (int32_t)n;
             out->b = 0;
-        } else if (!parse_pair(v, &out->a, &out->b)) {
+        } else if (!parse_pair(v, -MAX_COORD, &out->a, &out->b)) {
             return fail(err, EK_BAD_STEP, index, -1, "scroll must be an integer in -32767..32767 or [v, h]");
         }
         return true;
+
+    case STEP_MOVE_TO: {
+        if (!parse_pair(v, 0, &out->a, &out->b)) {
+            return fail(err, EK_BAD_STEP, index, -1, "move_to must be [x, y] with integers in 0..32767");
+        }
+        const cJSON *scr = cJSON_GetObjectItemCaseSensitive(obj, "screen");
+        if (scr) {
+            int32_t w, h;
+            if (!parse_pair(scr, 1, &w, &h)) {
+                return fail(err, EK_BAD_STEP, index, -1, "screen must be [width, height] with integers in 1..32767");
+            }
+            if (out->a >= w || out->b >= h) {
+                return fail(err, EK_BAD_STEP, index, -1, "move_to [%ld, %ld] is outside the %ldx%ld screen",
+                            (long)out->a, (long)out->b, (long)w, (long)h);
+            }
+            out->a = pixel_to_abs(out->a, w);
+            out->b = pixel_to_abs(out->b, h);
+        }
+        return true;
+    }
 
     case STEP_DELAY:
         if (!json_int(v, 0, MAX_MS, &n)) {

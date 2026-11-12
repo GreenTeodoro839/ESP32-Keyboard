@@ -13,6 +13,7 @@
 #include "console.h"
 #include "espkb.h"
 #include "hid_engine.h"
+#include "ota.h"
 #include "usb_hid.h"
 #include "wifi_mgr.h"
 
@@ -90,8 +91,9 @@ static void cmd_status(void)
     engine_status_t e;
     engine_get_status(&e);
     uint8_t leds = usb_hid_leds();
-    out("espkb %s, uptime %lld s, heap free %lu (min %lu)\n", ESPKB_FW_VERSION, (long long)(now_us() / 1000000),
-        (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size());
+    out("espkb %s (slot %s), uptime %lld s, heap free %lu (min %lu)\n", ESPKB_FW_VERSION, ota_running_partition(),
+        (long long)(now_us() / 1000000), (unsigned long)esp_get_free_heap_size(),
+        (unsigned long)esp_get_minimum_free_heap_size());
     out("usb: mounted=%d suspended=%d remote_wakeup=%d leds(num=%d caps=%d scroll=%d) kbd=%s mouse=%s\n",
         usb_hid_mounted(), usb_hid_suspended(), usb_hid_remote_wakeup_allowed(), leds & 1, (leds >> 1) & 1,
         (leds >> 2) & 1, usb_hid_boot_protocol(ITF_KBD) ? "boot" : "report",

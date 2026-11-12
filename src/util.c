@@ -22,6 +22,7 @@ static const struct {
     [EK_USB_NOT_READY]      = {"usb_not_ready", 503, "503 Service Unavailable", "USB is not enumerated by a host"},
     [EK_USB_SUSPENDED]      = {"usb_suspended", 503, "503 Service Unavailable", "host is suspended and did not allow remote wakeup"},
     [EK_TIMEOUT]            = {"timeout", 504, "504 Gateway Timeout", "host did not take a report within 1000 ms"},
+    [EK_INTERNAL]           = {"internal", 500, "500 Internal Server Error", "internal error"},
 };
 
 const char *espkb_err_code(espkb_err_t e)

@@ -4,7 +4,7 @@ Hardware fixtures (all session-scoped unless noted):
   bench            dict from tests/testbed.env (+ env overrides)
   device_host      device address from $ESPKB_HOST or tests/device.env (skips if absent)
   device_session   probes the device once (skips everything if unreachable)
-  hid              hidhost.HIDHost: claims both HID interfaces, asserts isolation
+  hid              hidhost.HIDHost: claims all HID interfaces, asserts isolation
                    (aborts the whole run if isolation cannot be established)
   dev              support.GuardedESPKB client (asserts isolation before every POST)
   raw              support.RawHTTP (requests) for header/body/status-level tests
@@ -17,7 +17,9 @@ Hardware fixtures (all session-scoped unless noted):
 Every test outside tests/offline gets the autouse clean-state fixture: before and
 after each test the device is released, verified idle with nothing held, the
 report log is drained, and token / config / LEDs / protocols / paused endpoints
-are restored.
+are restored.  Tests marked ``no_hid`` (firmware update) are the exception: they
+never produce HID output, so they run without the USB harness and look after
+their own state.
 """
 from __future__ import annotations
 
@@ -209,10 +211,20 @@ def set_token(dev):
 
 
 @pytest.fixture
-def wifi_restore(dev, bench):
-    """For tests that write WiFi credentials: always re-write the bench values."""
-    yield
+def wifi_restore(dev, bench, baseline_config):
+    """For tests that write WiFi credentials: always re-write the bench values.
+
+    Refuse when the device is not already on the bench network: the suite does not know that
+    network's password, so after the test changed the credentials it could not restore them.
+    """
     ssid, psk = bench.get("ESPKB_TEST_SSID"), bench.get("ESPKB_TEST_PSK")
+    current = baseline_config.get("wifi_ssid")
+    if ssid and current != ssid:
+        pytest.skip("this bench cannot change WiFi credentials safely: the device is on %r, the "
+                    "bench network is %r, and the password of the former is not configured "
+                    "(set ESPKB_TEST_SSID/ESPKB_TEST_PSK to the network the device should use)"
+                    % (current, ssid))
+    yield
     if ssid:
         dev.set_config(wifi_ssid=ssid, wifi_password=psk or "")
 
@@ -297,9 +309,18 @@ def _restore(dev, hid, baseline, phase):
         if k in baseline and cfg.get(k) != baseline[k]:
             fix[k] = baseline[k]
     if "wifi_ssid" in fix:
-        psk = support.bench_env().get("ESPKB_TEST_PSK")
-        if fix["wifi_ssid"] == support.bench_env().get("ESPKB_TEST_SSID") and psk:
+        bench = support.bench_env()
+        psk = bench.get("ESPKB_TEST_PSK")
+        if fix["wifi_ssid"] == bench.get("ESPKB_TEST_SSID") and psk:
             fix["wifi_password"] = psk
+        else:
+            # Writing the SSID alone would keep the *test* network's password in NVS; the device
+            # would then fail to join the baseline network after the next reboot.
+            problems.append("device wifi_ssid is %r but the baseline is %r, and no password for the "
+                            "baseline network is configured (set ESPKB_TEST_SSID/ESPKB_TEST_PSK to "
+                            "that network); not changing the SSID alone"
+                            % (cfg.get("wifi_ssid"), fix["wifi_ssid"]))
+            del fix["wifi_ssid"]
     if fix:
         dev.set_config(**fix)
     if hid.leds == 0:
@@ -330,7 +351,7 @@ def clean_state(dev, hid, baseline_config):
 
 @pytest.fixture(autouse=True)
 def _hw_clean_state(request):
-    if request.node.get_closest_marker("hw") is None:
+    if request.node.get_closest_marker("hw") is None or request.node.get_closest_marker("no_hid") is not None:
         yield
         return
     request.getfixturevalue("clean_state")

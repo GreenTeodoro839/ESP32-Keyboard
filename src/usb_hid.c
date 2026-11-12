@@ -16,6 +16,57 @@ static const char *TAG = "usb";
 static const uint8_t s_kbd_report_desc[] = {TUD_HID_REPORT_DESC_KEYBOARD()};
 static const uint8_t s_mouse_report_desc[] = {TUD_HID_REPORT_DESC_MOUSE()};
 
+/* Absolute mouse: the report of TinyUSB's TUD_HID_REPORT_DESC_ABSMOUSE
+ * (hid_abs_mouse_report_t), but with three buttons instead of five. Linux
+ * takes a device with absolute X/Y for a joystick as well (and creates
+ * /dev/input/jsN for it) unless its buttons are exactly left, right and
+ * middle, as on the absolute mice of virtual machines and remote consoles. */
+static const uint8_t s_abs_report_desc[] = {
+    HID_USAGE_PAGE(HID_USAGE_PAGE_DESKTOP),
+    HID_USAGE(HID_USAGE_DESKTOP_MOUSE),
+    HID_COLLECTION(HID_COLLECTION_APPLICATION),
+        HID_USAGE(HID_USAGE_DESKTOP_POINTER),
+        HID_COLLECTION(HID_COLLECTION_PHYSICAL),
+            /* byte 0: buttons 1-3, 5 bits of padding */
+            HID_USAGE_PAGE(HID_USAGE_PAGE_BUTTON),
+            HID_USAGE_MIN(1),
+            HID_USAGE_MAX(3),
+            HID_LOGICAL_MIN(0),
+            HID_LOGICAL_MAX(1),
+            HID_REPORT_COUNT(3),
+            HID_REPORT_SIZE(1),
+            HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
+            HID_REPORT_COUNT(1),
+            HID_REPORT_SIZE(5),
+            HID_INPUT(HID_CONSTANT),
+            /* bytes 1-4: X, Y absolute, 0..32767 */
+            HID_USAGE_PAGE(HID_USAGE_PAGE_DESKTOP),
+            HID_USAGE(HID_USAGE_DESKTOP_X),
+            HID_USAGE(HID_USAGE_DESKTOP_Y),
+            HID_LOGICAL_MIN(0),
+            HID_LOGICAL_MAX_N(ABS_MAX, 2),
+            HID_REPORT_SIZE(16),
+            HID_REPORT_COUNT(2),
+            HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
+            /* byte 5: wheel */
+            HID_USAGE(HID_USAGE_DESKTOP_WHEEL),
+            HID_LOGICAL_MIN(0x81),
+            HID_LOGICAL_MAX(0x7f),
+            HID_REPORT_COUNT(1),
+            HID_REPORT_SIZE(8),
+            HID_INPUT(HID_DATA | HID_VARIABLE | HID_RELATIVE),
+            /* byte 6: AC Pan */
+            HID_USAGE_PAGE(HID_USAGE_PAGE_CONSUMER),
+            HID_USAGE_N(HID_USAGE_CONSUMER_AC_PAN, 2),
+            HID_LOGICAL_MIN(0x81),
+            HID_LOGICAL_MAX(0x7f),
+            HID_REPORT_COUNT(1),
+            HID_REPORT_SIZE(8),
+            HID_INPUT(HID_DATA | HID_VARIABLE | HID_RELATIVE),
+        HID_COLLECTION_END,
+    HID_COLLECTION_END,
+};
+
 static const tusb_desc_device_t s_device_desc = {
     .bLength = sizeof(tusb_desc_device_t),
     .bDescriptorType = TUSB_DESC_DEVICE,
@@ -33,15 +84,17 @@ static const tusb_desc_device_t s_device_desc = {
     .bNumConfigurations = 1,
 };
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + 2 * TUD_HID_DESC_LEN)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + ITF_COUNT * TUD_HID_DESC_LEN)
 
 static const uint8_t s_config_desc[] = {
-    /* config 1, 2 interfaces, no string, bus powered + remote wakeup, 500 mA */
-    TUD_CONFIG_DESCRIPTOR(1, 2, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 500),
+    /* config 1, 3 interfaces, no string, bus powered + remote wakeup, 500 mA */
+    TUD_CONFIG_DESCRIPTOR(1, ITF_COUNT, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 500),
     /* interface 0: boot keyboard, EP 0x81, 8 bytes, 1 ms */
     TUD_HID_DESCRIPTOR(0, 4, HID_ITF_PROTOCOL_KEYBOARD, sizeof(s_kbd_report_desc), 0x81, 8, 1),
     /* interface 1: boot mouse, EP 0x82, 8 bytes, 1 ms */
     TUD_HID_DESCRIPTOR(1, 5, HID_ITF_PROTOCOL_MOUSE, sizeof(s_mouse_report_desc), 0x82, 8, 1),
+    /* interface 2: absolute mouse (no boot protocol), EP 0x83, 8 bytes, 1 ms */
+    TUD_HID_DESCRIPTOR(2, 6, HID_ITF_PROTOCOL_NONE, sizeof(s_abs_report_desc), 0x83, 8, 1),
 };
 
 static char s_serial[13];
@@ -52,20 +105,23 @@ static const char *s_strings[] = {
     s_serial,                     /* 3: serial number (MAC) */
     "ESPKB Keyboard",             /* 4: interface 0 */
     "ESPKB Mouse",                /* 5: interface 1 */
+    "ESPKB Absolute Mouse",       /* 6: interface 2 */
 };
 
 /* ---------- state ---------- */
 
 static usb_hid_notify_fn s_notify;
-static volatile bool s_inflight[2];
-static volatile bool s_failed[2];
+static volatile bool s_inflight[ITF_COUNT];
+static volatile bool s_failed[ITF_COUNT];
 static volatile uint8_t s_leds;
-static volatile bool s_boot[2];
+static volatile bool s_boot[2];   /* keyboard and relative mouse only */
 static volatile bool s_remote_wakeup;
 static volatile uint32_t s_generation;
 static volatile uint32_t s_completed;
 static portMUX_TYPE s_spin = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t s_last[2][8];   /* last submitted report, for GET_REPORT */
+static uint8_t s_last[ITF_COUNT][8];   /* last submitted report, for GET_REPORT */
+
+static const uint32_t s_done_evt[ITF_COUNT] = {USB_EVT_DONE_KBD, USB_EVT_DONE_MOUSE, USB_EVT_DONE_ABS};
 
 static void notify(uint32_t bits)
 {
@@ -76,8 +132,10 @@ static void notify(uint32_t bits)
 
 static void reset_link_state(void)
 {
-    s_inflight[0] = s_inflight[1] = false;
-    s_failed[0] = s_failed[1] = false;
+    for (int i = 0; i < ITF_COUNT; i++) {
+        s_inflight[i] = false;
+        s_failed[i] = false;
+    }
     s_boot[0] = s_boot[1] = false;
     s_leds = 0;
     portENTER_CRITICAL(&s_spin);
@@ -117,18 +175,25 @@ static void usb_event_cb(tinyusb_event_t *event, void *arg)
 
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
 {
-    return instance == ITF_MOUSE ? s_mouse_report_desc : s_kbd_report_desc;
+    switch (instance) {
+    case ITF_MOUSE:
+        return s_mouse_report_desc;
+    case ITF_ABS:
+        return s_abs_report_desc;
+    default:
+        return s_kbd_report_desc;
+    }
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type,
                                uint8_t *buffer, uint16_t reqlen)
 {
     (void)report_id;
-    if (instance > ITF_MOUSE) {
+    if (instance >= ITF_COUNT) {
         return 0;
     }
     if (report_type == HID_REPORT_TYPE_INPUT) {
-        uint16_t len = instance == ITF_KBD ? 8 : (s_boot[ITF_MOUSE] ? 3 : 5);
+        uint16_t len = instance == ITF_KBD ? 8 : instance == ITF_ABS ? ABS_REPORT_LEN : (s_boot[ITF_MOUSE] ? 3 : 5);
         if (len > reqlen) {
             len = reqlen;
         }
@@ -162,7 +227,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 void tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol)
 {
     if (instance > ITF_MOUSE) {
-        return;
+        return; /* the absolute interface has no boot protocol: its report format is fixed */
     }
     s_boot[instance] = (protocol == HID_PROTOCOL_BOOT);
     ESP_LOGI(TAG, "%s protocol: %s", instance == ITF_KBD ? "keyboard" : "mouse",
@@ -174,12 +239,12 @@ void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report, uint16_
 {
     (void)report;
     (void)len;
-    if (instance > ITF_MOUSE) {
+    if (instance >= ITF_COUNT) {
         return;
     }
     s_completed++;
     s_inflight[instance] = false;
-    notify(instance == ITF_KBD ? USB_EVT_DONE_KBD : USB_EVT_DONE_MOUSE);
+    notify(s_done_evt[instance]);
 }
 
 void tud_hid_report_failed_cb(uint8_t instance, hid_report_type_t report_type, uint8_t const *report,
@@ -187,12 +252,12 @@ void tud_hid_report_failed_cb(uint8_t instance, hid_report_type_t report_type, u
 {
     (void)report;
     (void)xferred_bytes;
-    if (instance > ITF_MOUSE || report_type != HID_REPORT_TYPE_INPUT) {
+    if (instance >= ITF_COUNT || report_type != HID_REPORT_TYPE_INPUT) {
         return;
     }
     s_failed[instance] = true;
     s_inflight[instance] = false;
-    notify(instance == ITF_KBD ? USB_EVT_DONE_KBD : USB_EVT_DONE_MOUSE);
+    notify(s_done_evt[instance]);
 }
 
 /* ---------- public API ---------- */
@@ -209,7 +274,7 @@ uint32_t usb_hid_reports_completed(void) { return s_completed; }
 
 bool usb_hid_submit(int itf, const uint8_t *data, uint16_t len)
 {
-    if (itf < 0 || itf > ITF_MOUSE || len > 8 || !tud_ready() || s_inflight[itf]) {
+    if (itf < 0 || itf >= ITF_COUNT || len > 8 || !tud_ready() || s_inflight[itf]) {
         return false;
     }
     portENTER_CRITICAL(&s_spin);

@@ -12,7 +12,7 @@ import time
 import pytest
 
 import hidhost as h
-from hidhost import Expected, Report, kbd_bytes, mouse_bytes
+from hidhost import Expected, Report, abs_bytes, kbd_bytes, mouse_bytes
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 API_MD = os.path.join(ROOT, "docs", "API.md")
@@ -251,6 +251,7 @@ def test_boot_mouse_reports_are_3_bytes():
     e = h.ReferenceEncoder(boot_mouse=True)
     assert [r.data for r in e.move(10, -5)] == [bytes([0, 10, 251])]
     assert e.scroll(3) == []
+    assert e.move_to(100, 100) == [] and e.abs_pos == (0, 0)
 
 
 def test_scroll_sign_and_split():
@@ -270,6 +271,39 @@ def test_steps_mixed_order_and_delay_gap():
     assert reps[3].gap_ms == 300
 
 
+def test_move_to_raw_and_screen():
+    e = h.ReferenceEncoder()
+    assert [(r.ep, r.data) for r in e.move_to(100, 32767)] == [("abs", abs_bytes(100, 32767))]
+    assert abs_bytes(0x1234, 0x0201) == bytes([0, 0x34, 0x12, 0x01, 0x02, 0, 0])
+    assert h.parse_abs(abs_bytes(5, 32767)).y == 32767
+    reps = e.move_to(960, 540, screen=[1920, 1080])
+    assert [r.data for r in reps] == [abs_bytes(16392, 16399)]
+    assert e.abs_pos == (16392, 16399)
+
+
+def test_move_to_same_position_goes_through_the_neighbour():
+    e = h.ReferenceEncoder()
+    # a host starts at (0, 0): moving there first needs the detour as well
+    assert [r.data for r in e.move_to(0, 0)] == [abs_bytes(1, 0), abs_bytes(0, 0)]
+    assert [r.data for r in e.move_to(32767, 5)] == [abs_bytes(32767, 5)]
+    assert [r.data for r in e.move_to(32767, 5)] == [abs_bytes(32766, 5), abs_bytes(32767, 5)]
+    # move_to does not touch the relative mouse or the keyboard, and release does not touch move_to
+    assert [r.ep for r in e.release()] == ["kbd", "mouse"]
+    assert e.abs_pos == (32767, 5)
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 7, 640, 1080, 1366, 1920, 2160, 2560, 3840, 7680, 16384, 20000, 32767])
+def test_pixel_to_abs_lands_on_the_pixel(n):
+    vals = [h.pixel_to_abs(p, n) for p in range(n)]
+    assert [h.abs_to_pixel(v, n) for v in vals] == list(range(n))
+    assert all(0 <= v <= 32767 for v in vals) and vals == sorted(vals)
+
+
+def test_abs_report_description():
+    assert h.describe("abs", abs_bytes(10, 20)) == "abs x=10 y=20"
+    assert "INVALID" in h.describe("abs", bytes(5))
+
+
 BAD_STEPS = [
     ({}, "exactly one verb"), ({"foo": 1}, "exactly one verb"), ({"key": "a", "move": [1, 1]}, "exactly one verb"),
     ({"key": True}, "string or integer"), ({"text": 5}, "string"), ({"delay": "5"}, "integer"),
@@ -283,6 +317,10 @@ BAD_STEPS = [
     ({"key": "a", "ttl_ms": 600001}, "ttl_ms"), ({"key": "a", "action": "press"}, "action"),
     ({"key": 256}, "range"), ({"release": False}, "release"), ({"text": "é"}, "unsupported"),
     ("notadict", "object"),
+    ({"move_to": [1]}, "move_to"), ({"move_to": [1.5, 2]}, "move_to"), ({"move_to": "1,2"}, "move_to"),
+    ({"move_to": [-1, 0]}, "range"), ({"move_to": [0, 32768]}, "range"),
+    ({"move_to": [1, 1], "screen": [0, 10]}, "screen"), ({"move_to": [1, 1], "screen": [10]}, "screen"),
+    ({"move_to": [10, 1], "screen": [10, 10]}, "outside"), ({"move_to": [1, 1], "move": [1, 1]}, "exactly one verb"),
 ]
 
 
@@ -298,7 +336,8 @@ def test_validate_accepts_boundaries_and_unknown_fields():
     ok = [{"key": "a", "comment": "x"}, {"move": [32767, -32767], "step": 127}, {"move": [1, 1], "step": 1},
           {"click": "forward", "count": 100, "hold_ms": 0, "interval_ms": 0}, {"delay": 0}, {"delay": 60000},
           {"scroll": [32767, -32767]}, {"key": "a", "repeat": 1000}, {"key": "a", "ttl_ms": 600000, "action": "down"},
-          {"key": 255}, {"release": True}]
+          {"key": 255}, {"release": True}, {"move_to": [0, 0]}, {"move_to": [32767, 32767]},
+          {"move_to": [9, 9], "screen": [10, 10]}, {"move_to": [32766, 0], "screen": [32767, 1]}]
     h.ReferenceEncoder().steps(ok)
 
 
@@ -409,6 +448,11 @@ MOUSE_RD = bytes.fromhex(
     "05 01 09 02 a1 01 09 01 a1 00 05 09 19 01 29 05 15 00 25 01 95 05 75 01 81 02"
     " 95 01 75 03 81 01 05 01 09 30 09 31 15 81 25 7f 75 08 95 02 81 06"
     " 09 38 15 81 25 7f 75 08 95 01 81 06 05 0c 0a 38 02 15 81 25 7f 75 08 95 01 81 06 c0 c0")
+# as read back from the device (sysfs report_descriptor of interface 2)
+ABS_RD = bytes.fromhex(
+    "05 01 09 02 a1 01 09 01 a1 00 05 09 19 01 29 03 15 00 25 01 95 03 75 01 81 02"
+    " 95 01 75 05 81 01 05 01 09 30 09 31 15 00 26 ff 7f 75 10 95 02 81 02"
+    " 09 38 15 81 25 7f 95 01 75 08 81 06 05 0c 0a 38 02 15 81 25 7f 95 01 75 08 81 06 c0 c0")
 
 
 def test_report_descriptor_keyboard_ok():
@@ -434,13 +478,32 @@ def test_report_descriptor_problems_detected():
     assert any("AC Pan" in p for p in probs) and any("40" in p for p in probs)
 
 
-def _config_descriptor(attrs=0xA0, interval=1, protos=(1, 2)):
-    def intf(n, proto, ep, rdlen):
-        return (bytes([9, 4, n, 0, 1, 3, 1, proto, 0]) + bytes([9, 0x21, 0x11, 0x01, 0, 1, 0x22, rdlen, 0])
+def test_report_descriptor_abs_ok():
+    rd = h.parse_report_descriptor(ABS_RD)
+    assert rd.bits("Input") == 56 and rd.report_ids == []
+    assert h.verify_abs_report_descriptor(rd) == []
+
+
+def test_report_descriptor_abs_problems_detected():
+    # TinyUSB's TUD_HID_REPORT_DESC_ABSMOUSE has 5 buttons: Linux then also makes it a joystick
+    five = ABS_RD.replace(bytes.fromhex("29 03"), bytes.fromhex("29 05")).replace(
+        bytes.fromhex("95 03 75 01 81 02 95 01 75 05"), bytes.fromhex("95 05 75 01 81 02 95 01 75 03"))
+    probs = h.verify_abs_report_descriptor(h.parse_report_descriptor(five))
+    assert len(probs) == 1 and "joystick" in probs[0]
+    narrow = ABS_RD.replace(bytes.fromhex("26 ff 7f"), bytes.fromhex("26 ff 0f"))
+    assert any("0..4095" in p for p in h.verify_abs_report_descriptor(h.parse_report_descriptor(narrow)))
+    assert h.verify_abs_report_descriptor(h.parse_report_descriptor(MOUSE_RD)) != []
+
+
+def _config_descriptor(attrs=0xA0, interval=1, protos=(1, 2), abs_itf=True):
+    def intf(n, sub, proto, ep, rdlen):
+        return (bytes([9, 4, n, 0, 1, 3, sub, proto, 0]) + bytes([9, 0x21, 0x11, 0x01, 0, 1, 0x22, rdlen, 0])
                 + bytes([7, 5, ep, 3, 8, 0, interval]))
-    body = intf(0, protos[0], 0x81, len(KBD_RD)) + intf(1, protos[1], 0x82, len(MOUSE_RD))
+    body = intf(0, 1, protos[0], 0x81, len(KBD_RD)) + intf(1, 1, protos[1], 0x82, len(MOUSE_RD))
+    if abs_itf:
+        body += intf(2, 0, 0, 0x83, len(ABS_RD))
     total = 9 + len(body)
-    return bytes([9, 2, total & 0xFF, total >> 8, 2, 1, 0, attrs, 50]) + body
+    return bytes([9, 2, total & 0xFF, total >> 8, 3 if abs_itf else 2, 1, 0, attrs, 50]) + body
 
 
 DEV_DESC = bytes([18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x3a, 0x30, 0x04, 0x40, 0x00, 0x01, 1, 2, 3, 1])
@@ -452,7 +515,11 @@ def test_usb_descriptors_verify_ok():
     assert (dev["idVendor"], dev["idProduct"]) == (0x303A, 0x4004)
     assert cfg["remote_wakeup"] and not cfg["self_powered"]
     assert cfg["interfaces"][0]["hid"]["descriptors"][0]["wDescriptorLength"] == len(KBD_RD)
-    assert h.verify_usb_descriptors(dev, cfg, 2, {0: KBD_RD, 1: MOUSE_RD}) == []
+    assert cfg["interfaces"][2]["endpoints"][0]["bEndpointAddress"] == 0x83
+    assert h.verify_usb_descriptors(dev, cfg, 2, {0: KBD_RD, 1: MOUSE_RD, 2: ABS_RD}) == []
+    old = h.parse_config_descriptor(_config_descriptor(abs_itf=False))
+    text = "\n".join(h.verify_usb_descriptors(dev, old, 2))
+    assert "bNumInterfaces = 2, expected 3" in text and "interface 2 missing" in text
 
 
 def test_usb_descriptors_verify_problems():
@@ -537,7 +604,7 @@ def test_wait_idle_times_out_under_continuous_traffic():
 # sysfs isolation logic (fake sysfs tree)
 # ---------------------------------------------------------------------------
 
-def make_sysfs(root, drivers=("usbhid", None), hid_child=False, missing_intf=False):
+def make_sysfs(root, drivers=("usbhid", None, None), hid_child=False, missing_intf=False):
     os.makedirs(os.path.join(root, "drivers", "usbhid"))
     os.makedirs(os.path.join(root, "drivers", "usbfs"))
     dev = os.path.join(root, "3-2")
@@ -563,33 +630,38 @@ def make_sysfs(root, drivers=("usbhid", None), hid_child=False, missing_intf=Fal
 
 
 def test_isolation_detects_usbhid(tmp_path):
-    root = make_sysfs(str(tmp_path), drivers=("usbhid", None))
+    root = make_sysfs(str(tmp_path), drivers=("usbhid", None, None))
     assert h.find_sysfs_devices(0x303A, 0x4004, root) == ["3-2"]
     probs = h.isolation_problems("3-2", root)
     assert len(probs) == 1 and "usbhid" in probs[0]
 
 
 def test_isolation_ok_unbound_and_claimed(tmp_path):
-    root = make_sysfs(str(tmp_path / "a"), drivers=(None, None))
+    root = make_sysfs(str(tmp_path / "a"), drivers=(None, None, None))
     assert h.isolation_problems("3-2", root) == []
-    assert len(h.isolation_problems("3-2", root, require_claimed=True)) == 2
-    root = make_sysfs(str(tmp_path / "b"), drivers=("usbfs", "usbfs"))
+    assert len(h.isolation_problems("3-2", root, require_claimed=True)) == 3
+    root = make_sysfs(str(tmp_path / "b"), drivers=("usbfs", "usbfs", "usbfs"))
     assert h.isolation_problems("3-2", root, require_claimed=True) == []
+    # the absolute mouse interface counts like the others
+    root = make_sysfs(str(tmp_path / "c"), drivers=("usbfs", "usbfs", "usbhid"))
+    assert any("3-2:1.2" in p and "usbhid" in p for p in h.isolation_problems("3-2", root))
+    root = make_sysfs(str(tmp_path / "d"), drivers=("usbfs", "usbfs"))
+    assert any("interface 2" in p for p in h.isolation_problems("3-2", root))
 
 
 def test_isolation_other_cases(tmp_path):
-    root = make_sysfs(str(tmp_path / "a"), drivers=("usbfs", "usbfs"), hid_child=True)
+    root = make_sysfs(str(tmp_path / "a"), drivers=("usbfs", "usbfs", "usbfs"), hid_child=True)
     assert any("HID children" in p for p in h.isolation_problems("3-2", root))
-    root = make_sysfs(str(tmp_path / "b"), drivers=("usbfs", "usbfs"), missing_intf=True)
+    root = make_sysfs(str(tmp_path / "b"), drivers=("usbfs", "usbfs", "usbfs"), missing_intf=True)
     assert any("interface 1" in p for p in h.isolation_problems("3-2", root))
     assert h.isolation_problems("9-9", root) != []
-    root = make_sysfs(str(tmp_path / "c"), drivers=("usbfs", "hid-generic"))
+    root = make_sysfs(str(tmp_path / "c"), drivers=("usbfs", "hid-generic", "usbfs"))
     assert any("hid-generic" in p for p in h.isolation_problems("3-2", root))
 
 
 def test_hidhost_check_cli_exit_codes(tmp_path):
     env = dict(os.environ)
-    for name, drivers, rc in (("bound", ("usbhid", None), 1), ("free", (None, None), 0)):
+    for name, drivers, rc in (("bound", ("usbhid", None, None), 1), ("free", (None, None, None), 0)):
         root = make_sysfs(str(tmp_path / name), drivers=drivers)
         r = subprocess.run([sys.executable, HIDHOST_PY, "check", "--sysfs", root], capture_output=True,
                            text=True, env=env, timeout=30)
@@ -658,15 +730,16 @@ def test_endpoint_max_packet_from_descriptors():
 
     class Dev:
         def get_active_configuration(self):
-            return [[E(0x81, 8)], [E(0x82, 0x0010), E(0x02, 64)]]
+            return [[E(0x81, 8)], [E(0x82, 0x0010), E(0x02, 64)], [E(0x83, 8)]]
 
     host = h.HIDHost()
-    assert host._endpoint_max_packet(Dev()) == {"kbd": 8, "mouse": 16}
+    assert host._endpoint_max_packet(Dev()) == {"kbd": 8, "mouse": 16, "abs": 8}
+    assert not any(e.kind == "error" for e in host.log.events())
 
     class Partial:
         def get_active_configuration(self):
             return [[E(0x81, 0x1008)]]  # high-bandwidth bits are masked off
-    assert host._endpoint_max_packet(Partial()) == {"kbd": 8, "mouse": 8}
+    assert host._endpoint_max_packet(Partial()) == {"kbd": 8, "mouse": 8, "abs": 8}
     assert any(e.kind == "error" for e in host.log.events())
 
 

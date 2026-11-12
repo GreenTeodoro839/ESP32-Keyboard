@@ -163,6 +163,16 @@ espkb_err_t http_access_check(httpd_req_t *req)
     return wifi_mgr_is_own_host(host) ? EK_NONE : EK_FORBIDDEN;
 }
 
+bool http_expect_continue(httpd_req_t *req)
+{
+    char exp[24];
+    bool too_long;
+    if (req->content_len > 0 && get_hdr(req, "Expect", exp, sizeof(exp), &too_long) && str_ieq(exp, "100-continue")) {
+        return httpd_send(req, "HTTP/1.1 100 Continue\r\n\r\n", 25) == 25;
+    }
+    return false;
+}
+
 body_result_t http_read_body(httpd_req_t *req, char **out, size_t *outlen)
 {
     *out = NULL;
@@ -170,11 +180,6 @@ body_result_t http_read_body(httpd_req_t *req, char **out, size_t *outlen)
     size_t len = req->content_len;
     if (len > ESPKB_MAX_BODY) {
         return BODY_TOO_LARGE;
-    }
-    char exp[24];
-    bool too_long;
-    if (len > 0 && get_hdr(req, "Expect", exp, sizeof(exp), &too_long) && str_ieq(exp, "100-continue")) {
-        httpd_send(req, "HTTP/1.1 100 Continue\r\n\r\n", 25);
     }
     char *buf = espkb_malloc(len + 1);
     if (!buf) {
@@ -214,6 +219,19 @@ bool http_drain_body(httpd_req_t *req)
     return true;
 }
 
+esp_err_t http_reject(httpd_req_t *req, espkb_err_t err, const char *msg)
+{
+    if (req->content_len <= 4096) {
+        http_send_error(req, err, msg, -1, -1, 0);
+        return ESP_OK;
+    }
+    /* The server would purge an unread body after ESP_OK without any limit. */
+    httpd_resp_set_hdr(req, "Connection", "close");
+    http_send_error(req, err, msg, -1, -1, 0);
+    http_drain_body(req);
+    return ESP_FAIL;
+}
+
 esp_err_t http_reject_too_large(httpd_req_t *req)
 {
     char msg[64];
@@ -226,18 +244,26 @@ esp_err_t http_reject_too_large(httpd_req_t *req)
     return ESP_FAIL; /* close the connection */
 }
 
-bool http_query_flag(httpd_req_t *req, const char *key)
+bool http_query_bool(httpd_req_t *req, const char *key, bool def)
 {
     size_t ql = httpd_req_get_url_query_len(req);
     if (ql == 0 || ql >= 600) {
-        return false;
+        return def;
     }
     char q[600], v[8];
-    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK ||
-        httpd_query_key_value(q, key, v, sizeof(v)) != ESP_OK) {
-        return false;
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
+        return def;
     }
-    return strcmp(v, "1") == 0 || str_ieq(v, "true") || str_ieq(v, "yes");
+    esp_err_t e = httpd_query_key_value(q, key, v, sizeof(v));
+    if (e == ESP_ERR_NOT_FOUND) {
+        return def;
+    }
+    return e == ESP_OK && (strcmp(v, "1") == 0 || str_ieq(v, "true") || str_ieq(v, "yes"));
+}
+
+bool http_query_flag(httpd_req_t *req, const char *key)
+{
+    return http_query_bool(req, key, false);
 }
 
 bool http_content_type_is(httpd_req_t *req, const char *type)

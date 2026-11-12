@@ -3,6 +3,7 @@
 #include "espkb.h"
 #include "hid_engine.h"
 #include "keymap.h"
+#include "ota.h"
 #include "status.h"
 #include "usb_hid.h"
 #include "wifi_mgr.h"
@@ -49,6 +50,7 @@ cJSON *status_build(bool with_ok)
         cJSON_AddNumberToObject(dev, "heap_free", (double)esp_get_free_heap_size());
         cJSON_AddNumberToObject(dev, "heap_min", (double)esp_get_minimum_free_heap_size());
         cJSON_AddStringToObject(dev, "reset_reason", reset_reason_str());
+        ota_add_device_info(dev);
     }
 
     cJSON *usb = cJSON_AddObjectToObject(root, "usb");
@@ -102,6 +104,7 @@ cJSON *status_build(bool with_ok)
         cJSON_AddStringToObject(wifi, "hostname", ws.hostname);
     }
 
+    ota_add_status(root);
     cJSON_AddNumberToObject(root, "ws_clients", ws_client_count());
     cJSON_AddBoolToObject(root, "auth_required", config_token_required());
     return root;

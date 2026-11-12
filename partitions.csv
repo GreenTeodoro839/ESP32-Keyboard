@@ -1,6 +1,10 @@
 # ESP32-S3 N16R8 (16 MB Flash)
+# Two app slots for firmware updates over WiFi (OTA, API.md section 11).
+# nvs holds the user configuration: its offset and size must never change, so
+# that neither an OTA update nor re-flashing over UART clears the settings.
 # Name,     Type,  SubType,  Offset,    Size,      Flags
 nvs,        data,  nvs,      0x9000,    0x5000,
-phy_init,   data,  phy,      0xe000,    0x1000,
-factory,    app,   factory,  0x10000,   0x400000,
-storage,    data,  spiffs,   0x410000,  0xbf0000,
+otadata,    data,  ota,      0xe000,    0x2000,
+ota_0,      app,   ota_0,    0x10000,   0x400000,
+ota_1,      app,   ota_1,    0x410000,  0x400000,
+storage,    data,  spiffs,   0x810000,  0x7f0000,
