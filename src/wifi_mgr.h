@@ -21,6 +21,9 @@ typedef struct {
 void wifi_mgr_start(void);
 void wifi_mgr_get_status(wifi_status_t *st);
 
+/* Cheap link-state read for the status LED (no WiFi API calls). */
+void wifi_mgr_get_link_state(bool *sta_connected, bool *ap_active);
+
 /* True if the Host header value names this device (STA IP, AP IP,
  * <hostname> or <hostname>.local, optionally with ":80"). */
 bool wifi_mgr_is_own_host(const char *host);

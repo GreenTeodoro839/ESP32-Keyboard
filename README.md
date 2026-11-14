@@ -1,20 +1,27 @@
 # ESPKB：WiFi 控制的 USB 键盘 + 鼠标
 
-ESPKB 是一块 ESP32-S3（N16R8）上的固件：它通过 WiFi 接收指令（HTTP + WebSocket），在 USB 口上表现为一个标准 USB 键盘 + 鼠标（相对移动和绝对定位，VID:PID `303a:4004`）。
+ESPKB 是一块 ESP32-S3 SuperMini（ESP32-S3FH4R2：4 MB Flash + 2 MB PSRAM）上的固件：它通过 WiFi 接收指令（HTTP + WebSocket），在 USB 口上表现为一个标准 USB 键盘 + 鼠标（相对移动和绝对定位，VID:PID `303a:4004`）。
 适合给不方便插键盘鼠标的机器打字、按组合键、移动/点击鼠标，可以用网页操作，也可以由脚本或 AI agent 调用。
 
 完整接口说明见 [`docs/API.md`](docs/API.md)，本文只讲怎么用。
 
 ## 接线
 
-开发板上有两个 USB-C 口：
+SuperMini 只有一个 USB-C 口，直连芯片的原生 USB：
 
 | 口 | 接到哪里 | 用途 |
 |---|---|---|
-| 原生 USB 口（芯片的 USB） | **被控电脑** | 键盘 + 鼠标（HID） |
-| UART 口（CH343 串口芯片） | 你的开发电脑（或只接电源） | 烧录、日志、串口控制台 |
+| USB-C（原生 USB，无串口芯片） | **被控电脑** | 键盘 + 鼠标（HID） |
+| | 你的开发电脑 | 烧录、供电 |
 
-两个口都能供电。被控电脑上无需安装任何驱动。
+烧录时接到开发电脑，日常使用时接到被控电脑。被控电脑上无需安装任何驱动。
+
+板上没有 CH343 之类的 USB-UART 芯片，而且 USB Serial/JTAG 与 HID 共用 D+/D-，固件运行后这个口只能当键盘鼠标用。
+串口日志和控制台在 UART0（GPIO43/44）上，需要外接 USB-UART 适配器才能用（这两个脚是否引出取决于具体板子）。
+
+板载蓝色 WS2812 指示灯（GPIO48）显示网络状态：未连上 WiFi（配网热点或重连中）蓝色慢闪，连上后熄灭，
+固件更新期间白色快闪。USB-C 旁边那颗红色电源指示灯与 WS2812 共用 GPIO48（并联），固件在数据帧之间把
+引脚拉高让它常亮；那颗约 1 Hz 闪烁的蓝色小灯是充电指示，不受固件控制。
 
 ## 编译与烧录
 
@@ -22,35 +29,41 @@ ESPKB 是一块 ESP32-S3（N16R8）上的固件：它通过 WiFi 接收指令（
 
 ```bash
 pio run              # 编译；web/index.html 会被自动 gzip 打包进固件
-pio run -t upload    # 通过 UART 口烧录
+pio run -t upload    # 通过 USB-C（USB Serial/JTAG）烧录
 ```
 
-两个口都插在同一台电脑上时，建议固定烧录口：新建 `platformio_local.ini`（已被 git 忽略）：
+烧录前用 USB-C 线把设备接到开发电脑。固件运行后该口是 HID，esptool 的自动复位可能失效；
+如果提示无法进入下载模式，按住 BOOT 再点一下 RST，然后重新执行 `pio run -t upload`。
+
+需要固定烧录口时，新建 `platformio_local.ini`（已被 git 忽略）：
 
 ```ini
 [env:esp32-s3-devkitc-1]
-upload_port  = /dev/serial/by-id/<你的串口>
-monitor_port = /dev/serial/by-id/<你的串口>
+upload_port  = /dev/ttyACM0          ; 或 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_...
+monitor_port = /dev/ttyACM0
 ```
 
-硬件参数按 N16R8（16 MB Flash + 8 MB Octal PSRAM）写在 `platformio.ini` 和 `sdkconfig.defaults` 里，其它型号需要相应修改。
+硬件参数按 ESP32-S3 SuperMini（S3FH4R2：4 MB QIO Flash + 2 MB Quad PSRAM）写在 `platformio.ini` 和
+`sdkconfig.defaults` 里；换成 N16R8 等其它型号时，要同时改 Flash 大小、PSRAM 模式（Octal/Quad）和
+`partitions.csv`。
 
 串口烧录不会清除设备上的配置（WiFi、令牌等），以后的版本可以直接通过 WiFi 更新，见下面的[固件更新](#固件更新ota)。
 不要用 `pio run -t erase`：它会擦除整片 Flash，包括配置。
 
 ### 从 1.0.0 升级
 
-1.1.0 改了分区表（两个固件分区，用于 OTA），所以**第一次**必须用串口烧录：`pio run -t upload`。
+1.1.0 改了分区表（两个固件分区，用于 OTA），所以**第一次**必须用 USB 线烧录：`pio run -t upload`。
 配置分区的位置没有变，WiFi 等设置会保留，烧录后设备照常联网。之后的更新就可以走 WiFi 了。
-如果项目目录里有 1.0.0 时生成的 `sdkconfig.esp32-s3-devkitc-1`，先把它删掉再编译（它是自动生成的文件，会按 `sdkconfig.defaults` 重新生成），
-否则新增的配置项不生效，编译会报错提示这一点。
+如果项目目录里有 1.0.0（或旧 N16R8 配置）生成的 `sdkconfig.esp32-s3-devkitc-1`，先把它删掉再编译
+（它是自动生成的文件，会按 `sdkconfig.defaults` 重新生成），否则新增的配置项不生效，编译会报错提示这一点。
+从 N16R8 换到 SuperMini 时同样要在删除后重新编译，否则 Flash/PSRAM 设置仍是旧板子的。
 
 ## 首次配网
 
 设备还没有 WiFi 配置时（或连续 20 s 连不上路由器时），会开启配网热点 `ESPKB-XXXX`（密码 `espkb1234`），
 连上后打开 `http://192.168.4.1/`，在“设置”里填写路由器 SSID 和密码并重启设备。
 
-也可以用 UART 口的串口控制台（115200 波特率）配置：
+如果你把 UART0（GPIO43/44）接到了外部 USB-UART 适配器，也可以用串口控制台（115200 波特率）配置：
 
 ```bash
 .venv/bin/python tools/serialcon.py cmd 'wifi "我的WiFi" 我的密码'   # 只保存，重启后生效
@@ -135,6 +148,8 @@ python3 tools/espkb.py --help          # 全部命令和 step 格式
 ## 已知限制
 
 - 只支持 US 键盘布局的 ASCII 文本，不能直接输入中文。
+- 板载 PCB 天线，WiFi 距离和穿墙能力弱于带外置天线的开发板；USB-C 口焊在小板上，机械强度有限。
+- 只有一个 USB-C 口，烧录和 HID 不能同时用；没有板载串口芯片，日志/串口控制台需要外接 USB-UART 适配器。
 - 绝对定位（`move_to`）用的是第 3 个 USB 接口，BIOS 等只认 boot 协议的环境里不起作用；多显示器时对应哪块屏幕由被控系统决定。
   从 1.1.0 升级上来后 USB 设备描述变了（多了一个接口），被控电脑会把它当作新设备重新识别一次。
 - 在大量 WebSocket 客户端频繁断开重连的压力下，偶尔会有新建的 HTTP/WebSocket 连接被立即断开（ESP-IDF HTTP 服务器的延迟关闭机制相关），客户端重试即可。

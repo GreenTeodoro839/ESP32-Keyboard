@@ -483,6 +483,18 @@ void wifi_mgr_get_status(wifi_status_t *st)
     }
 }
 
+void wifi_mgr_get_link_state(bool *sta_connected, bool *ap_active)
+{
+    lock();
+    if (sta_connected) {
+        *sta_connected = W.sta_connected;
+    }
+    if (ap_active) {
+        *ap_active = W.ap_active;
+    }
+    unlock();
+}
+
 bool wifi_mgr_is_own_host(const char *host)
 {
     char h[80];

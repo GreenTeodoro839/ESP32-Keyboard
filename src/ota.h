@@ -9,6 +9,7 @@
  * bring up the network at all, the bootloader returns to the previous image. */
 #pragma once
 
+#include <stdbool.h>
 #include "cJSON.h"
 #include "esp_http_server.h"
 
@@ -29,3 +30,6 @@ void ota_add_status(cJSON *root);
 
 /* Label of the running app partition ("ota_0"); never NULL. No locking. */
 const char *ota_running_partition(void);
+
+/* True while an upload is being received or verified (used by the status LED). */
+bool ota_in_progress(void);

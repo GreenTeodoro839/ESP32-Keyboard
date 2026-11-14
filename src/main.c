@@ -26,6 +26,7 @@
 #include "hid_engine.h"
 #include "http_api.h"
 #include "ota.h"
+#include "status_led.h"
 #include "wifi_mgr.h"
 
 static const char *TAG = "main";
@@ -97,6 +98,7 @@ void app_main(void)
     engine_init();      /* USB device + HID engine */
     wifi_mgr_start();
     ota_init();         /* after WiFi: a freshly updated image is confirmed once the network is up */
+    status_led_start(); /* after WiFi/OTA: it shows their state */
     http_api_start();
     xTaskCreate(button_task, "button", 3072, NULL, 2, NULL);
 

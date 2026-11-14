@@ -128,6 +128,14 @@ const char *ota_running_partition(void)
     return run ? run->label : "";
 }
 
+bool ota_in_progress(void)
+{
+    lock();
+    bool busy = S.state == OTA_RECEIVING || S.state == OTA_VERIFYING;
+    unlock();
+    return busy;
+}
+
 void ota_init(void)
 {
     S.mx = xSemaphoreCreateMutex();
