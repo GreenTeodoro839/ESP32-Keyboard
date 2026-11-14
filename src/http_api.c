@@ -321,6 +321,7 @@ static esp_err_t h_config_get(httpd_req_t *req)
         cJSON_AddBoolToObject(o, "ap_password_set", c.ap_password_custom);
         cJSON_AddBoolToObject(o, "token_set", c.token[0] != '\0');
         cJSON_AddNumberToObject(o, "key_delay_ms", c.key_delay_ms);
+        cJSON_AddBoolToObject(o, "led_quiet", c.led_quiet);
     }
     memset(&c, 0, sizeof(c));
     return http_send_obj(req, EK_NONE, o);

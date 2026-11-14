@@ -32,7 +32,8 @@ STATUS = {
     "auth_required": False,
 }
 CONFIG = {"ok": True, "hostname": "espkb", "wifi_ssid": "MyWiFi", "wifi_password_set": True,
-          "ap_ssid": "ESPKB-5D8C", "ap_password_set": True, "token_set": False, "key_delay_ms": 5}
+          "ap_ssid": "ESPKB-5D8C", "ap_password_set": True, "token_set": False, "key_delay_ms": 5,
+          "led_quiet": False}
 KEYS = {"ok": True, "keys": {"enter": 40, "a": 4, "return": 40, "ctrl": 224},
         "buttons": ["left", "right", "middle", "back", "forward"]}
 INFO = {"ok": True, "name": "espkb", "api": 1, "version": "1.0.0",

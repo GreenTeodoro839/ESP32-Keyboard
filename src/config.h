@@ -18,11 +18,19 @@ typedef struct {
     char token[65];
     uint16_t key_delay_ms;
     bool ap_password_custom;
+    bool led_quiet;
 } espkb_config_t;
 
 void config_init(void);
 void config_get(espkb_config_t *out);
 uint16_t config_key_delay(void);
+
+/* LED quiet mode ("do not disturb", API.md §7): true = no LEDs in the normal
+ * state. Toggled by a short BOOT press or POST /api/config; the status LED
+ * task polls config_led_quiet(). */
+bool config_led_quiet(void);
+bool config_set_led_quiet(bool quiet, char *msg, size_t msglen);
+
 bool config_token_required(void);
 /* Checks a candidate token (not NUL-terminated) in constant time. */
 bool config_token_ok(const char *tok, size_t len);

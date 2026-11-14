@@ -127,6 +127,7 @@ static esp_err_t save_locked(const espkb_config_t *c)
     if (err == ESP_OK) err = nvs_set_str(h, "appass", c->ap_password);
     if (err == ESP_OK) err = nvs_set_str(h, "token", c->token);
     if (err == ESP_OK) err = nvs_set_u16(h, "kdelay", c->key_delay_ms);
+    if (err == ESP_OK) err = nvs_set_u8(h, "lquiet", c->led_quiet ? 1 : 0);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     if (err != ESP_OK) {
@@ -150,6 +151,11 @@ void config_init(void)
         if (nvs_get_u16(h, "kdelay", &s_cfg.key_delay_ms) != ESP_OK) {
             s_cfg.key_delay_ms = CFG_DEFAULT_KEY_DELAY;
         }
+        uint8_t quiet = 0;
+        if (nvs_get_u8(h, "lquiet", &quiet) != ESP_OK) {
+            quiet = 0;
+        }
+        s_cfg.led_quiet = quiet != 0;
         nvs_close(h);
     } else {
         snprintf(s_cfg.hostname, sizeof(s_cfg.hostname), "%s", CFG_DEFAULT_HOSTNAME);
@@ -191,6 +197,11 @@ void config_get(espkb_config_t *out)
 uint16_t config_key_delay(void)
 {
     return s_cfg.key_delay_ms; /* 16-bit aligned read is atomic */
+}
+
+bool config_led_quiet(void)
+{
+    return s_cfg.led_quiet; /* single-byte read is atomic */
 }
 
 bool config_token_required(void)
@@ -271,6 +282,11 @@ bool config_update_json(const cJSON *obj, bool *reboot_required, char *msg, size
         }
         kd = (long)d;
     }
+    const cJSON *qi = cJSON_GetObjectItemCaseSensitive(obj, "led_quiet");
+    if (qi && !cJSON_IsBool(qi)) {
+        snprintf(msg, msglen, "led_quiet must be a boolean");
+        return false;
+    }
 
     lock();
     espkb_config_t c = s_cfg;
@@ -298,6 +314,9 @@ bool config_update_json(const cJSON *obj, bool *reboot_required, char *msg, size
     }
     if (kd >= 0) {
         c.key_delay_ms = (uint16_t)kd;
+    }
+    if (qi) {
+        c.led_quiet = cJSON_IsTrue(qi);
     }
     esp_err_t err = save_locked(&c);
     if (err == ESP_OK) {
@@ -384,6 +403,16 @@ bool config_set_key_delay(long ms, char *msg, size_t msglen)
     lock();
     espkb_config_t c = s_cfg;
     c.key_delay_ms = (uint16_t)ms;
+    bool ok = apply(&c, msg, msglen);
+    unlock();
+    return ok;
+}
+
+bool config_set_led_quiet(bool quiet, char *msg, size_t msglen)
+{
+    lock();
+    espkb_config_t c = s_cfg;
+    c.led_quiet = quiet;
     bool ok = apply(&c, msg, msglen);
     unlock();
     return ok;

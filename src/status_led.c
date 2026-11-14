@@ -15,6 +15,10 @@
  *   connected                                        WS2812 off (red stays lit)
  *   firmware upload in progress (POST /api/ota)      white fast blink
  *
+ * Quiet mode ("do not disturb", toggled by a short BOOT press, persisted in
+ * the config) holds the pin low between frames instead: the red LED and the
+ * boot flash are off, so a connected board shows no light at all.
+ *
  * Only blue and white are used: both look the same whichever RGB/GRB order a
  * clone uses. GPIO48 is SPICLK_N on ESP32-S3 variants with octal PSRAM, so the
  * LED is compiled out for those targets (the current board is an FH4R2 with
@@ -29,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "soc/gpio_sig_map.h"
+#include "config.h"
 #include "ota.h"
 #include "status_led.h"
 #include "wifi_mgr.h"
@@ -46,10 +51,6 @@ static const char *TAG = "status_led";
 /* 500 us: enough for WS2812B (50 us) and WS2812B-V5 (280 us). */
 #define RESET_TICKS       5000
 #define LATCH_MS          2
-
-/* Refresh the latched colour even when it did not change, so a frame lost to
- * noise cannot leave the WS2812 showing a stale colour. */
-#define REFRESH_US        (2000000)
 
 /* Dim enough not to glare, bright enough to see across a desk. */
 #define LEVEL             40
@@ -120,11 +121,12 @@ static bool rmt_setup(void)
     return true;
 }
 
-/* Give the pin back to the GPIO block and hold it high: the plain red LED on
- * the same pin lights up, while the WS2812 (already latched) ignores the
- * steady level. After RMT has owned the pin the GPIO matrix still points at
- * the peripheral, hence the explicit output signal selection. */
-static void led_idle_high(void)
+/* Give the pin back to the GPIO block and hold it at the idle level: high
+ * lights the plain red LED sharing the pin (the WS2812, already latched,
+ * ignores the steady level); low is the quiet mode. After RMT has owned the
+ * pin the GPIO matrix still points at the peripheral, hence the explicit
+ * output signal selection. */
+static void led_idle(bool high)
 {
     rmt_teardown();
     const gpio_config_t io = {
@@ -136,7 +138,7 @@ static void led_idle_high(void)
     };
     if (gpio_config(&io) == ESP_OK) {
         esp_rom_gpio_connect_out_signal(LED_GPIO, SIG_GPIO_OUT_IDX, false, false);
-        gpio_set_level(LED_GPIO, 1);
+        gpio_set_level(LED_GPIO, high ? 1 : 0);
     }
 }
 
@@ -144,7 +146,7 @@ static void led_idle_high(void)
 static void led_write(const uint8_t grb[3])
 {
     if (!rmt_setup()) {
-        led_idle_high();
+        led_idle(!config_led_quiet());
         return;
     }
     rmt_transmit_config_t tx = {
@@ -169,7 +171,7 @@ static void led_write(const uint8_t grb[3])
         ESP_LOGW(TAG, "RMT transmit failed: %s", esp_err_to_name(err));
     }
     vTaskDelay(pdMS_TO_TICKS(LATCH_MS));
-    led_idle_high();
+    led_idle(!config_led_quiet());
 }
 
 typedef enum { MODE_OFF, MODE_NO_LINK, MODE_OTA } led_mode_t;
@@ -180,12 +182,13 @@ static void led_task(void *arg)
     led_mode_t mode = MODE_OFF;
     bool phase_on = false;
     int64_t next_toggle_us = 0;
-    int64_t last_write_us = 0;
     const uint8_t *painted = DARK;
+    bool last_quiet = config_led_quiet();
 
     for (;;) {
         bool sta_connected = false, ap_active = false;
         int64_t now = esp_timer_get_time();
+        bool quiet = config_led_quiet();
         wifi_mgr_get_link_state(&sta_connected, &ap_active);
         (void)ap_active;   /* both the AP and the reconnect wait show as "no link" */
 
@@ -209,10 +212,19 @@ static void led_task(void *arg)
             }
         }
 
-        if (want != painted || now - last_write_us >= REFRESH_US) {
+        if (want != painted || quiet != last_quiet) {
             led_write(want);
+            /* Entering the steady dark state: one repeat covers a lost frame,
+             * since no further writes follow while nothing changes. A periodic
+             * re-send is deliberately avoided: handing the pin back to RMT for
+             * it made the shared red LED flicker faintly every couple of
+             * seconds in quiet mode. */
+            if (mode == MODE_OFF && want == DARK && painted != DARK) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                led_write(want);
+            }
             painted = want;
-            last_write_us = now;
+            last_quiet = quiet;
         }
         vTaskDelay(pdMS_TO_TICKS(LED_POLL_MS));
     }
@@ -221,16 +233,18 @@ static void led_task(void *arg)
 void status_led_start(void)
 {
     if (!rmt_setup()) {
-        ESP_LOGW(TAG, "RMT init failed; leaving GPIO%d high", LED_GPIO);
-        led_idle_high();
+        ESP_LOGW(TAG, "RMT init failed; leaving GPIO%d at its idle level", LED_GPIO);
+        led_idle(!config_led_quiet());
         return;
     }
     led_write(DARK);
     /* One visible flash proves the WS2812 is being addressed, even when the
-     * board boots connected. */
-    led_write(BLUE);
-    vTaskDelay(pdMS_TO_TICKS(200));
-    led_write(DARK);
+     * board boots connected. Quiet mode stays completely dark. */
+    if (!config_led_quiet()) {
+        led_write(BLUE);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        led_write(DARK);
+    }
 
     if (xTaskCreate(led_task, "status_led", LED_TASK_STACK, NULL, 2, NULL) != pdPASS) {
         ESP_LOGW(TAG, "task creation failed");

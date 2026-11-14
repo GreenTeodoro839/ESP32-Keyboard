@@ -9,7 +9,7 @@
  *   wifi_mgr    - STA reconnect, fallback AP, scans
  *   ota         - only while a firmware image is being uploaded (POST /api/ota)
  *   console     - UART0 command line
- *   button      - BOOT button factory reset
+ *   button      - BOOT button: short press toggles LED quiet mode, 5 s hold = factory reset
  */
 #include "cJSON.h"
 #include "driver/gpio.h"
@@ -33,6 +33,7 @@ static const char *TAG = "main";
 
 #define BOOT_BUTTON       GPIO_NUM_0
 #define FACTORY_RESET_MS  5000
+#define SHORT_PRESS_MAX_MS 1000   /* released before this = short press */
 
 static void button_task(void *arg)
 {
@@ -61,6 +62,15 @@ static void button_task(void *arg)
                 esp_restart();
             }
         } else {
+            if (held_ms > 0 && held_ms < SHORT_PRESS_MAX_MS) {
+                char msg[64];
+                bool quiet = !config_led_quiet();
+                if (config_set_led_quiet(quiet, msg, sizeof(msg))) {
+                    ESP_LOGI(TAG, "quiet mode %s (short BOOT press)", quiet ? "on" : "off");
+                } else {
+                    ESP_LOGW(TAG, "toggling quiet mode failed: %s", msg);
+                }
+            }
             held_ms = 0;
         }
     }

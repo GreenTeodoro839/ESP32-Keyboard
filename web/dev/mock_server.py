@@ -207,7 +207,7 @@ class Device:
         self.t0 = time.monotonic()
         self.token = args.token or ""
         self.config = {"hostname": "espkb", "wifi_ssid": "" if args.ap_mode else "MyWiFi",
-                       "key_delay_ms": 5}
+                       "key_delay_ms": 5, "led_quiet": False}
         self.secrets = {"wifi_password": "" if args.ap_mode else "password1",
                         "ap_password": "espkb1234"}
         self.usb = {"mounted": args.usb != "unmounted", "suspended": args.usb == "suspended",
@@ -629,7 +629,7 @@ def make_app(dev):
         return ok(hostname=dev.config["hostname"], wifi_ssid=dev.config["wifi_ssid"],
                   wifi_password_set=bool(dev.secrets["wifi_password"]), ap_ssid="ESPKB-5D8C",
                   ap_password_set=bool(dev.secrets["ap_password"]), token_set=bool(dev.token),
-                  key_delay_ms=dev.config["key_delay_ms"])
+                  key_delay_ms=dev.config["key_delay_ms"], led_quiet=dev.config["led_quiet"])
 
     async def post_config(request):
         try:
@@ -649,6 +649,7 @@ def make_app(dev):
             "ap_password": lambda v: isinstance(v, str) and 8 <= blen(v) <= 63,
             "token": lambda v: isinstance(v, str) and re.fullmatch(r"[\x21-\x7e]{0,64}", v),
             "key_delay_ms": lambda v: is_int(v) and 0 <= v <= 1000,
+            "led_quiet": lambda v: isinstance(v, bool),
         }
         for k, fn in checks.items():
             if k in b and not fn(b[k]):
@@ -664,6 +665,8 @@ def make_app(dev):
                 reboot = True
         if "key_delay_ms" in b:
             dev.config["key_delay_ms"] = b["key_delay_ms"]
+        if "led_quiet" in b:
+            dev.config["led_quiet"] = b["led_quiet"]
         if "token" in b:
             dev.token = b["token"]
             dev.schedule_push()

@@ -202,7 +202,7 @@ USB 未就绪时，WS 发来的任务直接丢弃并报 `usb_not_ready`，不排
 
 ```json
 {"ok":true,"hostname":"espkb","wifi_ssid":"MyWiFi","wifi_password_set":true,
- "ap_ssid":"ESPKB-5D8C","ap_password_set":true,"token_set":false,"key_delay_ms":5}
+ "ap_ssid":"ESPKB-5D8C","ap_password_set":true,"token_set":false,"key_delay_ms":5,"led_quiet":false}
 ```
 
 `POST /api/config` 可写字段：
@@ -215,6 +215,7 @@ USB 未就绪时，WS 发来的任务直接丢弃并报 `usb_not_ready`，不排
 | `ap_password` | 8–63 字节 | `espkb1234` | 重启后 |
 | `token` | 0–64 位可打印 ASCII（无空格）；空串 = 关闭鉴权 | 空 | 立即 |
 | `key_delay_ms` | 0–1000 | 5 | 立即 |
+| `led_quiet` | 布尔值 | `false` | 立即 |
 
 取值非法 → 400 `bad_request`，任何字段都不保存。
 
@@ -225,6 +226,9 @@ USB 未就绪时，WS 发来的任务直接丢弃并报 `usb_not_ready`，不排
 `hostname <name>`、`keydelay <ms>`、`reboot`、`factory-reset`。控制台不提供任何会发出 HID 事件的命令。
 
 **恢复出厂**：运行中按住 BOOT 键 5 s → 清空配置并重启。
+
+**免打扰**：短按 BOOT 键（不足 1 s）切换 `led_quiet`。开启后红色电源指示灯熄灭、启动自检闪烁不发，
+已连上 WiFi 的正常状态下整机无灯光；配网和固件更新期间的提示闪烁保留。设置存于 NVS，重启后依然生效。
 
 ## 8. 键名
 

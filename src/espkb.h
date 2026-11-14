@@ -8,7 +8,7 @@
 
 #define ESPKB_NAME        "espkb"
 #define ESPKB_API_VERSION 1
-#define ESPKB_FW_VERSION  "1.3.0"   /* also the image version, see the top-level CMakeLists.txt */
+#define ESPKB_FW_VERSION  "1.4.0"   /* also the image version, see the top-level CMakeLists.txt */
 
 #define ESPKB_MAX_BODY      65536   /* HTTP request body limit (API.md §1); POST /api/ota is exempt */
 #define ESPKB_MAX_STEPS     512     /* steps per request (API.md §4) */
